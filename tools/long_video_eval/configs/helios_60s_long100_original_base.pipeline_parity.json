@@ -1,0 +1,136 @@
+{
+  "defaults": {
+    "project_root": "{config_dir}/../../..",
+    "source_root": "{project_root}/outputs/long_video_eval/source_root",
+    "prompt_file": "{project_root}/example/prompt.txt",
+    "output_root": "{project_root}/outputs/long_video_eval/results",
+    "dataset_name": "helios_60s_long100_original_base",
+    "duration_frames": 1452,
+    "models": ["base"],
+    "gpus": ["0", "1", "2", "3", "4", "5", "6", "7"],
+    "cache_dir": "{project_root}/checkpoints/eval_ckpts"
+  },
+  "python_packages": [
+    {"import": "torch", "pip": "torch"},
+    {"import": "decord", "pip": "decord==0.6.0"},
+    {"import": "transformers", "pip": "transformers"},
+    {"import": "huggingface_hub", "pip": "huggingface_hub"},
+    {"import": "PIL", "pip": "Pillow"}
+  ],
+  "resources": [
+    {
+      "id": "dover_code",
+      "type": "git",
+      "path": "{project_root}/third-party/DOVER",
+      "url": "https://github.com/VQAssessment/DOVER.git"
+    },
+    {
+      "id": "dover_weights",
+      "type": "local_path",
+      "path": "{cache_dir}/DOVER/DOVER.pth"
+    },
+    {
+      "id": "pickscore_model",
+      "type": "hf_snapshot",
+      "repo_id": "yuvalkirstain/PickScore_v1",
+      "path": "{cache_dir}/PickScore/PickScore_v1",
+      "repo_type": "model"
+    },
+    {
+      "id": "pickscore_processor",
+      "type": "hf_snapshot",
+      "repo_id": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+      "path": "{cache_dir}/PickScore/CLIP-ViT-H-14-laion2B-s32B-b79K",
+      "repo_type": "model"
+    },
+    {
+      "id": "hpsv3_code",
+      "type": "git",
+      "path": "{project_root}/third-party/HPSv3",
+      "url": "https://github.com/MizzenAI/HPSv3.git"
+    },
+    {
+      "id": "hpsv3_weights",
+      "type": "hf_file",
+      "repo_id": "MizzenAI/HPSv3",
+      "filename": "HPSv3.safetensors",
+      "path": "{cache_dir}/HPSv3/HPSv3.safetensors",
+      "repo_type": "model"
+    },
+    {
+      "id": "qwen2vl_7b",
+      "type": "hf_snapshot",
+      "repo_id": "Qwen/Qwen2-VL-7B-Instruct",
+      "path": "{cache_dir}/Qwen2-VL-7B-Instruct",
+      "repo_type": "model"
+    },
+    {
+      "id": "heliosbench_eval_code",
+      "type": "local_path",
+      "path": "{project_root}/eval"
+    },
+    {
+      "id": "heliosbench_weights",
+      "type": "hf_snapshot",
+      "repo_id": "BestWishYsh/HeliosBench-Weights",
+      "path": "{cache_dir}/HeliosBench",
+      "repo_type": "model"
+    },
+    {
+      "id": "fastvideo_code",
+      "type": "git",
+      "path": "{project_root}/third-party/FastVideo",
+      "url": "https://github.com/hao-ai-lab/FastVideo.git"
+    }
+  ],
+  "run": {
+    "steps": [
+      {
+        "name": "heliosbench",
+        "kind": "external_command",
+        "enabled": true,
+        "cwd": "{project_root}",
+        "env": {
+          "DATASET_NAME": "helios_60s_long100_original_base",
+          "SOURCE_ROOT": "{source_root}",
+          "PROMPT_JSONL": "{prompt_jsonl}",
+          "OUTPUT_ROOT": "{output_root}/heliosbench/60s/long100_original/base",
+          "DURATION_FRAMES": "1452",
+          "MODELS": "base",
+          "GPUS": "{gpus_space}",
+          "NUM_SHARDS": "{num_shards}",
+          "METRICS": "aesthetic motion_amplitude motion_smoothness semantic drifting_aesthetic drifting_motion_smoothness drifting_semantic",
+          "CONDA_ENV": ""
+        },
+        "command": [
+          "bash",
+          "scripts/evaluation/run_heliosbench_on_our_prompts_visko3.sh"
+        ]
+      },
+      {
+        "name": "segment_drift_eval",
+        "kind": "external_command",
+        "enabled": true,
+        "cwd": "{project_root}",
+        "env": {
+          "SOURCE_ROOT": "{source_root}",
+          "PROMPT_FILE": "{prompt_file}",
+          "OUTPUT_ROOT": "{output_root}/ratio/60s/long100_original/base",
+          "OUTPUT_PREFIX": "60s_long100_original_base_ratio15",
+          "MODELS": "base",
+          "GPUS": "{gpus_comma}",
+          "FPS": "24",
+          "DRIFT_RATIO": "0.15",
+          "METRICS": "dover,pickscore,hpsv3",
+          "RUN_VBENCH": "1",
+          "FRAMES_PER_CHUNK": "1",
+          "CONDA_ENV": ""
+        },
+        "command": [
+          "bash",
+          "scripts/evaluation/run_helios_long_ratio_eval_sharded_visko3.sh"
+        ]
+      }
+    ]
+  }
+}
