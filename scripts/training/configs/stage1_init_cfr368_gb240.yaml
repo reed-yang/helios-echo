@@ -1,0 +1,176 @@
+output_dir: /mnt/beegfs/xiangbo/helios_runs/stage1_init_cfr368_gb240
+logging_dir: logs
+seed: 44
+
+
+report_to:
+  tracker_name: Helios-Train
+  wandb_name: stage1_init_cfr368_gb240
+  report_to: wandb
+
+
+data_config:
+  # ---- Base ----
+  use_shuffle: true
+  pin_memory: true
+  persistent_workers: true
+  force_rebuild: true          # required when single_res is enabled (assertion in the dataset)
+  single_res: true
+  single_height: 368           # 368x640; latent h=46 -> pad_for_3d_conv pads to 48
+  single_width: 640
+  dataloader_num_workers: 8
+  prefetch_factor: 2
+  caption_dropout_p: 0
+  id_token: ""
+  # ---- Stage 1 ----
+  use_stage1_dataset: true
+  instance_data_root:
+    # 387,670 pre-encoded 368x640 latents (cfr_int + cfr_int_bprime).
+    - "/mnt/beegfs/dataset/video_single_24FPS/latents_cfr_int_30b_368x640"
+
+
+model_config:
+  # ---- Path ----
+  # VAE / text_encoder / tokenizer from the LOCAL Helios-Base snapshot.
+  pretrained_model_name_or_path: "/mnt/beegfs/xiangbo/.cache/huggingface/hub/models--BestWishYsh--Helios-Base/snapshots/21cf91da9cae0270a9405000c2e798f83770b1dd"
+  # STAGE-1-INIT: start the transformer from the RAW Wan2.1-T2V-14B-Diffusers base (architectural adaptation).
+  transformer_model_name_or_path: "/mnt/beegfs/xiangbo/wan_diffusers/Wan2.1-T2V-14B-Diffusers"
+  subfolder: "transformer"
+  load_checkpoints_custom: false
+  load_dcp: false
+  # ---- Vae ----
+  upcast_vae: true
+  enable_slicing: false
+  enable_tiling: false
+  # ---- LoRA r128 / alpha 128 (Stage-1-init spec) ----
+  lora_rank: 128
+  lora_alpha: 128.0
+  lora_dropout: 0.0
+  lora_layers: "all-linear"
+  lora_exclude_modules:
+    - down
+    - up
+  # ---- Other ----
+  train_norm_layers: false
+
+
+validation_config:
+  # Built-in validation DISABLED (external eval handles inference). Keep a prompt so config validates.
+  validation_steps: 100000000
+  validation_height: 368
+  validation_width: 640
+  validation_max_num_frames: 99
+  validation_prompts:
+    - "A stylish woman walks down a Tokyo street filled with warm glowing neon and animated city signage."
+  validation_guidance_scale: 5.0
+  validation_latent_window_size:
+    - 9
+  num_validation_videos: 1
+  num_inference_steps: 50
+  use_dynamic_shifting: true
+  time_shift_type: "exponential"
+  first_step_valid: false
+
+
+training_config:
+  # ---- Environment ----
+  allow_tf32: false
+  gradient_checkpointing: true     # MANDATORY: gc-off OOMs (~138 GiB) even at bs2 on H200
+  enable_xformers_memory_efficient_attention: false
+  enable_npu_flash_attention: false
+  upcast_before_saving: false
+  offload: false
+  mixed_precision: "bf16"
+  # ---- Training Resource ----
+  # STAGE-1-INIT: Global Batch = 128. 4 nodes x 8 GPU x bs4 x accum1 = 128.
+  # Steps 5500 (init spec).  ckpt every 500.
+  max_train_steps: 5500
+  train_batch_size: 3              # per-GPU; 5 nodes x 8 GPU x bs3 x accum1 = global batch 120
+  gradient_accumulation_steps: 2
+  checkpointing_steps: 500      # only save at multiples of 500 (per user)
+  checkpoints_total_limit: 30
+  resume_from_checkpoint: "latest"
+  save_checkpoints_custom: false
+  skip_dataloader_dcp: true        # world-size-agnostic resume
+  scale_lr: false
+  # ---- Optimizer (Stage-1-init spec: lr 5e-5, CONSTANT, no warmup) ----
+  learning_rate: 5e-5
+  lr_scheduler: "constant"         # diffusers "constant" ignores warmup_steps -> pure constant 5e-5
+  lr_warmup_steps: 0
+  optimizer: "adamw"
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_weight_decay: 1e-04
+  adam_epsilon: 1e-08
+  max_grad_norm: 1.0
+  weighting_scheme: "logit_normal"
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+  # ---- Dynamic Shifting Parameters ----
+  use_dynamic_shifting: false
+  time_shift_type: "exponential"
+  base_seq_len: 256
+  max_seq_len: 4096
+  base_shift: 0.5
+  max_shift: 1.15
+  # ---- VAE Decode Parameters ----
+  vae_decode_type: "default"
+  # ---- EMA Parameters ----
+  use_ema: false
+  use_ema_validation: false
+  ema_decay: 0.999
+  ema_start_step: 250
+  ema_zero3_port: 10543
+  ema_deepspeed_config_file: "scripts/accelerate_configs/zero3.json"
+  # ---- Stage 1 Parameters ----
+  is_enable_stage1: true
+  history_sizes:
+    - 16
+    - 2
+    - 1
+  latent_window_size:
+    - 9
+  is_random_drop: true
+  random_drop_v2v_ratio: 0.4
+  random_drop_t2v_ratio: 0.4
+  #
+  corrupt_model_input: false       # spec p_a = 0.0 (no target/model-input corruption)
+  corrupt_mode_model_input: "noise"
+  corrupt_mode_prob_model_input: 0.9
+  is_frame_independent_corrupt_model_input: true
+  is_chunk_independent_corrupt_model_input: false
+  noise_corrupt_ratio_model_input: 0.33333333333333
+  noise_corrupt_clean_prob_model_input: 0.1
+  downsample_min_corrupt_ratio_model_input: 0.9
+  downsample_max_corrupt_ratio_model_input: 1.0
+  # History corrupt, aligned to the SPEC you gave (p_a=0, p_b=0.8 noise, p_c=0.1 downsample, p_d=0.1 clean;
+  # b sigma in [0,0.33], c downsample strength in [0,0.1] -> resize fraction [0.9,1.0]).
+  # NOTE: the in-repo stage_1_init.yaml uses noise-only (corrupt_mode_history="noise", p_b=0.9, p_c=0).
+  # To revert to that reference, set corrupt_mode_history: "noise".
+  corrupt_history: true
+  corrupt_mode_history: "random"           # SPEC: enable noise+downsample mix (was "noise" in repo ref)
+  corrupt_mode_prob_history: 0.8889         # P(noise)=0.9*0.8889=0.8=p_b ; P(downsample)=0.9*0.1111=0.1=p_c
+  is_frame_independent_corrupt_history: true
+  is_chunk_independent_corrupt_history: false
+  noise_corrupt_ratio_history_short: 0.33333333333333   # b_max = 0.33
+  noise_corrupt_ratio_history_mid: 0.33333333333333
+  noise_corrupt_ratio_history_long: 0.33333333333333
+  noise_corrupt_clean_prob_history: 0.1     # p_d = 0.1
+  downsample_min_corrupt_ratio_history: 0.9 # c strength in [0,0.1] -> resize fraction [0.9,1.0]
+  downsample_max_corrupt_ratio_history: 1.0
+  #
+  is_amplify_history: false
+  history_scale_mode: "per_head"
+  #
+  is_train_full_patch_embedding: false
+  is_train_lora_patch_embedding: true
+  has_multi_term_memory_patch: true
+  is_train_full_multi_term_memory_patchg: true
+  is_train_lora_multi_term_memory_patchg: false
+  zero_history_timestep: true
+  guidance_cross_attn: true
+  restrict_self_attn: false
+  is_train_restrict_lora: false
+  restrict_lora: false
+  restrict_lora_rank: 128

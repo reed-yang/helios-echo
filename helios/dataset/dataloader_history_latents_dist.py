@@ -32,6 +32,9 @@ class BucketedFeatureDataset(Dataset):
         self.single_res = single_res
         self.single_height = single_height
         self.single_width = single_width
+        # Rewritten caption versions that may be stored per .pt as prompt_embed_<v>.
+        # If present, __getitem__ picks one uniformly at random per sample.
+        self.caption_versions = ["ultra_short", "short", "medium", "long"]
         assert self.is_keep_x0, "is_keep_x0 need to be True now!"
 
         self.base_seed = seed
@@ -188,10 +191,35 @@ class BucketedFeatureDataset(Dataset):
         history_latent = continue_source_latent[:, start_indice : start_indice + history_window_size, :, :]
         target_latent = continue_vae_latent[:, start_indice + history_window_size : end_indice, :, :]
 
-        return x0_latent, history_latent, target_latent, clean_all_vae_latent
+        # choice_idx is the index of the target chunk (0-based over total_sections). It is
+        # returned so the multi-event path can look up which event owns this chunk.
+        return x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx
 
     def __len__(self):
         return len(self.samples)
+
+    def _pick_prompt_embed(self, feature_data, choice_idx=None):
+        """Select the prompt embed for the sampled target chunk.
+
+        Multi-event (prompt-switching) data stores one embed per event plus a
+        chunk->event map; we return the embed of the event that owns the chunk at
+        ``choice_idx``. This is what teaches Helios to switch prompts at chunk
+        boundaries (the transformer/forward/loss are unchanged). Falls back to the
+        single-prompt caption-mixing path for ordinary Stage-1 .pt files.
+        """
+        if (
+            choice_idx is not None
+            and "event_idx_per_chunk" in feature_data
+            and "event_prompt_embeds" in feature_data
+        ):
+            event_per_chunk = feature_data["event_idx_per_chunk"]
+            event_idx = int(event_per_chunk[min(int(choice_idx), len(event_per_chunk) - 1)].item())
+            return feature_data["event_prompt_embeds"][event_idx]
+        # uniformly pick one rewritten caption version if available; else legacy embed.
+        available = [v for v in self.caption_versions if f"prompt_embed_{v}" in feature_data]
+        if available:
+            return feature_data[f"prompt_embed_{random.choice(available)}"]
+        return feature_data["prompt_embed"]
 
     def __getitem__(self, idx):
         anchor_f = self.samples[idx]["num_frame"]
@@ -205,7 +233,10 @@ class BucketedFeatureDataset(Dataset):
                 or anchor_h != sample_info["height"]
                 or anchor_w != sample_info["width"]
             ):
-                idx = random.randint(0, len(self.samples) - 1)
+                # Retry within the SAME (num_frame,h,w) bucket so the replacement always matches the
+                # anchor dims; random-global retry can spiral forever when the anchor frame-count is rare.
+                _bk = self.buckets.get((anchor_f, anchor_h, anchor_w))
+                idx = random.choice(_bk) if _bk else random.randint(0, len(self.samples) - 1)
                 print("Try to find a same dim sample, retrying...")
                 continue
 
@@ -231,14 +262,17 @@ class BucketedFeatureDataset(Dataset):
                     base_vae_latent = torch.load(base_file_path, map_location="cpu", weights_only=False)["vae_latent"]
 
                 feature_data = torch.load(sample_info["file_path"], map_location="cpu", weights_only=False)
-                x0_latent, history_latent, target_latent, clean_all_vae_latent = self.prepare_stage1_latent(
-                    feature_data["vae_latent"], idx, base_vae_latent
+                x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx = (
+                    self.prepare_stage1_latent(feature_data["vae_latent"], idx, base_vae_latent)
                 )
                 if self.return_prompt_raw:
                     prompt_raws = feature_data["prompt_raw"]
                 break
             except Exception:
-                idx = random.randint(0, len(self.samples) - 1)
+                # Same-bucket retry (see note above): a corrupt/transiently-unreadable .pt must not send us
+                # spiralling over random global indices looking for a same-dim replacement.
+                _bk = self.buckets.get((anchor_f, anchor_h, anchor_w))
+                idx = random.choice(_bk) if _bk else random.randint(0, len(self.samples) - 1)
                 print(f"Error loading {sample_info['file_path']}, retrying...")
                 file_name = os.path.basename(sample_info["file_path"])
                 txt_name = f"{file_name}.txt"
@@ -256,7 +290,8 @@ class BucketedFeatureDataset(Dataset):
             "history_latents": history_latent,
             "target_latents": target_latent,
             "clean_all_latents": clean_all_vae_latent,
-            "prompt_embeds": feature_data["prompt_embed"],
+            # Per-chunk prompt for multi-event data (else random caption-version mixing).
+            "prompt_embeds": self._pick_prompt_embed(feature_data, choice_idx),
             "prompt_attention_masks": feature_data.get("prompt_attention_mask", None),
         }
 

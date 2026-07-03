@@ -144,7 +144,11 @@ def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    # find_unused_parameters=True adds an extra autograd-graph traversal every iteration (DDP warns it
+    # "adversely affects performance"). Gated so we can A/B it: HELIOS_DDP_FIND_UNUSED=0 turns it off.
+    # Safe to turn off only if no params are ever unused (drop paths zero inputs, not skip layers).
+    _find_unused = os.environ.get("HELIOS_DDP_FIND_UNUSED", "1") != "0"
+    kwargs = DistributedDataParallelKwargs(find_unused_parameters=_find_unused)
     init_kwargs = InitProcessGroupKwargs(backend="nccl", timeout=timedelta(seconds=1800))
 
     # Support 2 models training using deepspeed.
@@ -399,7 +403,57 @@ def main(args):
         target_modules=list(target_modules),
         exclude_modules=list(args.model_config.lora_exclude_modules),
     )
-    transformer.add_adapter(transformer_lora_config)
+    if getattr(args.model_config, "is_full_finetune", False):
+        if getattr(args.model_config, "full_finetune_scope", "all") == "base_linear_lora_patch":
+            # Hybrid full-FT: full-train the base linear backbone (attn/FFN/proj/time-embed) and the
+            # memory patches, but keep the two most structure-sensitive pieces conservative to avoid the
+            # Round-1 full-FT drift (see docs/FULLFT_COMPARISON_AND_STABILITY.md):
+            #   - norm/AdaLN         -> FROZEN
+            #   - patch_embedding    -> FROZEN base + a LoRA r=lora_rank adapter (only its LoRA trains)
+            # ORDER MATTERS: add_adapter (inject_adapter_in_model) re-freezes ALL non-adapter params, so
+            # attach the patch_embedding adapter FIRST, then unfreeze the backbone, then re-freeze the
+            # two conservative pieces.
+            patch_embedding_lora_config = LoraConfig(
+                r=args.model_config.lora_rank,
+                lora_alpha=args.model_config.lora_alpha,
+                lora_dropout=args.model_config.lora_dropout,
+                init_lora_weights="gaussian",
+                target_modules=["patch_embedding"],
+            )
+            transformer.add_adapter(patch_embedding_lora_config)
+            transformer.requires_grad_(True)  # full backbone + memory + (temporarily) patch_embedding base
+            for name, param in transformer.named_parameters():
+                if any(k in name for k in NORM_LAYER_PREFIXES):
+                    param.requires_grad = False  # freeze norm/AdaLN
+                elif "patch_embedding" in name and "lora_" not in name:
+                    param.requires_grad = False  # freeze patch_embedding base (keep only its LoRA)
+            # seed the patch_embedding LoRA from an existing adapter so the run CONTINUES a prior
+            # patch_embedding LoRA instead of a fresh gaussian init (empty path -> fresh). On resume the
+            # DeepSpeed engine restores these params, so this initial seed is harmless there.
+            pe_init = getattr(args.model_config, "patch_embedding_lora_init_path", "") or ""
+            if pe_init and os.path.isfile(pe_init):
+                from safetensors.torch import load_file as _st_load_file
+
+                pe_raw = _st_load_file(pe_init)
+                pe_state = {
+                    k.replace("transformer.", ""): v
+                    for k, v in pe_raw.items()
+                    if k.startswith("transformer.") and "patch_embedding" in k
+                }
+                pe_state = convert_unet_state_dict_to_peft(pe_state)
+                incompatible = set_peft_model_state_dict(transformer, pe_state, adapter_name="default")
+                logger.info(
+                    f"Seeded patch_embedding LoRA from {pe_init} ({len(pe_state)} tensors); "
+                    f"unexpected={getattr(incompatible, 'unexpected_keys', None)}"
+                )
+            else:
+                logger.info(f"patch_embedding LoRA: fresh gaussian init (no init path: '{pe_init}')")
+        else:
+            # Full fine-tune: train the ENTIRE transformer, no LoRA adapter. (transformer_lora_config is
+            # still built above but left unused; the LoRA-only save/load paths are bypassed below.)
+            transformer.requires_grad_(True)
+    else:
+        transformer.add_adapter(transformer_lora_config)
 
     if args.model_config.train_norm_layers:
         for name, param in transformer.named_parameters():
@@ -421,6 +475,36 @@ def main(args):
             if trainable_module_name in name:
                 param.requires_grad = True
                 break
+
+    if (
+        getattr(args.model_config, "is_full_finetune", False)
+        and getattr(args.model_config, "full_finetune_scope", "all") == "base_linear_lora_patch"
+    ):
+        # Definitive scope audit in the log: norm/AdaLN + patch_embedding-base must be 0 trainable;
+        # patch_embedding LoRA + memory patches must be > 0; base-linear is the bulk.
+        def _cnt(pred):
+            n = tot = 0
+            for name, param in transformer.named_parameters():
+                if pred(name):
+                    tot += param.numel()
+                    if param.requires_grad:
+                        n += param.numel()
+            return n, tot
+
+        pe_lora_tr, _ = _cnt(lambda n: "patch_embedding" in n and "lora_" in n)
+        pe_base_tr, _ = _cnt(lambda n: "patch_embedding" in n and "lora_" not in n)
+        norm_tr, _ = _cnt(lambda n: any(k in n for k in NORM_LAYER_PREFIXES))
+        mem_tr, _ = _cnt(lambda n: any(k in n for k in ["patch_short", "patch_mid", "patch_long"]))
+        total_tr = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
+        logger.info(
+            "[full_finetune_scope=base_linear_lora_patch] trainable params: "
+            f"total={total_tr/1e9:.3f}B | patch_embedding_LoRA={pe_lora_tr/1e6:.2f}M "
+            f"| memory_patch={mem_tr/1e6:.2f}M | patch_embedding_base(trainable, must=0)={pe_base_tr} "
+            f"| norm/AdaLN(trainable, must=0)={norm_tr}"
+        )
+        assert pe_base_tr == 0, "patch_embedding base must be frozen"
+        assert norm_tr == 0, "norm/AdaLN must be frozen"
+        assert pe_lora_tr > 0 and mem_tr > 0, "patch_embedding LoRA + memory patches must be trainable"
 
     if args.training_config.use_ema:
         model_cls = HeliosTransformer3DModel
@@ -563,6 +647,18 @@ def main(args):
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
+        if getattr(args.model_config, "is_full_finetune", False):
+            # Full fine-tune: keep this collective save hook CLEAN. The full model + optimizer are
+            # written by accelerator.save_state's DeepSpeed engine (checkpoint-*/pytorch_model/), which
+            # is fully resumable. Do NOT do heavy, rank-0-only work (e.g. a 28GB save_pretrained) inside
+            # this pre-hook: it desynchronizes the DeepSpeed collective save path and deadlocks the next
+            # step. A consolidated HF `transformer/` (for eval) is produced (a) by the post-loop final
+            # save below, and (b) offline from any checkpoint via its bundled `zero_to_fp32.py`
+            # (-> consolidated fp32 state_dict -> load into HeliosTransformer3DModel -> save_pretrained).
+            if weights:
+                while weights:
+                    weights.pop()
+            return
         if accelerator.is_main_process:
             transformer_lora_layers_to_save = None
             modules_to_save = {}
@@ -598,6 +694,15 @@ def main(args):
             save_extra_components(args, model=unwrap_model(model), output_dir=output_dir)
 
     def load_model_hook(models, input_dir):
+        if getattr(args.model_config, "is_full_finetune", False):
+            # Full fine-tune: accelerator.load_state restores the full model + optimizer from the
+            # DeepSpeed engine checkpoint. We only restore the stateful dataloader (DCP) here; no LoRA.
+            dcp_dir = os.path.join(input_dir, "distributed_checkpoint")
+            if "critic" not in dcp_dir and os.path.isdir(dcp_dir):
+                states = {"dataloader": train_dataloader}
+                dcp.load(states, checkpoint_id=dcp_dir)
+            return
+
         transformer_ = None
 
         if not accelerator.distributed_type == DistributedType.DEEPSPEED:
@@ -663,7 +768,7 @@ def main(args):
             cast_training_params(models)
 
         dcp_dir = os.path.join(input_dir, "distributed_checkpoint")
-        if "critic" not in dcp_dir:
+        if "critic" not in dcp_dir and os.path.isdir(dcp_dir):
             states = {
                 "dataloader": train_dataloader,
             }
@@ -698,7 +803,9 @@ def main(args):
             )
 
     # Make sure the trainable params are in float32.
-    if args.training_config.mixed_precision != "fp32":
+    # Full fine-tune: do NOT upcast the whole 14B transformer to fp32 here — DeepSpeed ZeRO keeps the
+    # fp32 master copy internally; upcasting all params would needlessly double resident memory.
+    if args.training_config.mixed_precision != "fp32" and not getattr(args.model_config, "is_full_finetune", False):
         models = [transformer]
         if args.training_config.is_train_dmd:
             models.append(real_score_model)
@@ -1267,7 +1374,10 @@ def main(args):
                         vae.to("cpu", non_blocking=True)
                     if text_encoder is not None:
                         text_encoder.to("cpu", non_blocking=True)
-                    free_memory()
+                    # empty_cache() here returns ALL cached blocks to the driver every step (54GB thrash +
+                    # stall); gate it like the other hot-loop free_memory() calls. HELIOS_THROTTLE_FREE=1 skips.
+                    if os.environ.get("HELIOS_THROTTLE_FREE", "0") != "1":
+                        free_memory()
 
                 # Set NULL Text
                 if prompt_embeds is not None:
@@ -1884,7 +1994,9 @@ def main(args):
                 del ode_prompt_embeds
                 del text_prompt_raws
                 del text_prompt_embeds
-                free_memory()
+                # Per-step free_memory() (gc.collect+empty_cache) stalls the hot loop; gate it.
+                if os.environ.get("HELIOS_THROTTLE_FREE", "0") != "1":
+                    free_memory()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -2006,13 +2118,14 @@ def main(args):
                 if global_step % args.training_config.checkpointing_steps == 0:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
 
-                    states = {
-                        "dataloader": train_dataloader,
-                    }
-                    dcp_dir = os.path.join(save_path, "distributed_checkpoint")
-                    dcp.save(states, checkpoint_id=dcp_dir)
-                    states = None
-                    del states
+                    if not getattr(args.training_config, "skip_dataloader_dcp", False):
+                        states = {
+                            "dataloader": train_dataloader,
+                        }
+                        dcp_dir = os.path.join(save_path, "distributed_checkpoint")
+                        dcp.save(states, checkpoint_id=dcp_dir)
+                        states = None
+                        del states
                     free_memory()
 
                     if accelerator.is_main_process or accelerator.distributed_type == DistributedType.DEEPSPEED:
@@ -2252,7 +2365,8 @@ def main(args):
                     vae.to("cpu", non_blocking=True)
                 if text_encoder is not None:
                     text_encoder.to("cpu", non_blocking=True)
-                free_memory()
+                if os.environ.get("HELIOS_THROTTLE_FREE", "0") != "1":
+                    free_memory()
 
             if args.training_config.offload:
                 if vae is not None:
@@ -2271,7 +2385,8 @@ def main(args):
 
             logs = None
             del logs
-            free_memory()
+            if os.environ.get("HELIOS_THROTTLE_FREE", "0") != "1":
+                free_memory()
 
     if prof is not None:
         prof.stop()
@@ -2299,26 +2414,38 @@ def main(args):
                 model_to_save.to(torch.float32)
             else:
                 model_to_save.to(weight_dtype)
-        transformer_lora_layers = get_peft_model_state_dict(model_to_save)
-        if args.model_config.train_norm_layers:
-            transformer_norm_layers = {
-                f"transformer.{name}": param
-                for name, param in model_to_save.named_parameters()
-                if any(k in name for k in NORM_LAYER_PREFIXES)
-            }
-            transformer_lora_layers = {
-                **transformer_lora_layers,
-                **transformer_norm_layers,
-            }
-        modules_to_save["transformer"] = model_to_save
+        if getattr(args.model_config, "is_full_finetune", False):
+            # Full fine-tune: write the consolidated transformer as a standalone HF dir (loadable by
+            # inference exactly like Helios-Base). ZeRO-2 keeps full params on every rank.
+            if getattr(args.model_config, "full_finetune_scope", "all") == "base_linear_lora_patch":
+                # fuse the patch_embedding LoRA into its base Conv3d and drop the adapter so the saved
+                # transformer/ is a clean, PEFT-free HeliosTransformer3DModel loadable by inference.
+                model_to_save.fuse_lora(lora_scale=1.0, safe_fusing=True)
+                model_to_save.unload_lora()
+            model_to_save.save_pretrained(os.path.join(save_path, "transformer"))
+            save_extra_components(args, model=model_to_save, output_dir=save_path)
+            model_to_save.to(original_dtype)
+        else:
+            transformer_lora_layers = get_peft_model_state_dict(model_to_save)
+            if args.model_config.train_norm_layers:
+                transformer_norm_layers = {
+                    f"transformer.{name}": param
+                    for name, param in model_to_save.named_parameters()
+                    if any(k in name for k in NORM_LAYER_PREFIXES)
+                }
+                transformer_lora_layers = {
+                    **transformer_lora_layers,
+                    **transformer_norm_layers,
+                }
+            modules_to_save["transformer"] = model_to_save
 
-        HeliosPipeline.save_lora_weights(
-            save_directory=save_path,
-            transformer_lora_layers=transformer_lora_layers,
-            **_collate_lora_metadata(modules_to_save),
-        )
-        save_extra_components(args, model=model_to_save, output_dir=save_path)
-        model_to_save.to(original_dtype)
+            HeliosPipeline.save_lora_weights(
+                save_directory=save_path,
+                transformer_lora_layers=transformer_lora_layers,
+                **_collate_lora_metadata(modules_to_save),
+            )
+            save_extra_components(args, model=model_to_save, output_dir=save_path)
+            model_to_save.to(original_dtype)
 
         if args.training_config.use_ema and ema_transformer is not None:
             ema_state_dict = gather_zero3ema(accelerator, ema_transformer)
@@ -2540,6 +2667,21 @@ if __name__ == "__main__":
     assert not (
         conf.training_config.is_train_full_patch_embedding and conf.training_config.is_train_lora_patch_embedding
     ), "Both 'is_train_full_patch_embedding' and 'is_train_lora_patch_embedding' cannot be True at the same time."
+
+    # full_finetune_scope guard: the hybrid scope needs is_full_finetune and must NOT also full/lora-train
+    # patch_embedding via the generic flags (the scope attaches its own patch_embedding LoRA internally).
+    _ff_scope = getattr(conf.model_config, "full_finetune_scope", "all")
+    assert _ff_scope in ("all", "base_linear_lora_patch"), (
+        f"Unknown full_finetune_scope '{_ff_scope}' (expected 'all' or 'base_linear_lora_patch')."
+    )
+    if _ff_scope == "base_linear_lora_patch":
+        assert conf.model_config.is_full_finetune, (
+            "full_finetune_scope='base_linear_lora_patch' requires is_full_finetune=true."
+        )
+        assert not conf.training_config.is_train_full_patch_embedding, (
+            "full_finetune_scope='base_linear_lora_patch' handles patch_embedding as LoRA internally; "
+            "set is_train_full_patch_embedding=false."
+        )
 
     assert not (conf.training_config.use_error_recycling and conf.training_config.corrupt_history), (
         "Both 'use_error_recycling' and 'corrupt_history' cannot be True at the same time."

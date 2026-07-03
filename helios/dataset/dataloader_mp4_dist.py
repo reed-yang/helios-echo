@@ -26,6 +26,24 @@ resolution_bucket_options = {
         (448, 576),
         (512, 768),
         (384, 640),
+        (368, 640),  # 368x640 landscape (Stage-1 cfr 368 run); ~16:9 clips snap here, closer than 384x640
+        (384, 768),
+        (320, 768),
+    ],
+    # Wan2.2-TI2V-5B uses a 16x-spatial VAE: 368/16=23 is ODD and breaks the stride-2 patch_embedding,
+    # while 384/16=24 is clean. Identical to 640 but WITHOUT the (368,640) bucket, so ~16:9 source snaps
+    # to the even-latent (384,640). Select with --resolution 642 at encode time; leaves the 640 set (and
+    # the existing Wan2.1 / cfr368 pipeline) untouched.
+    642: [
+        (768, 320),
+        (768, 384),
+        (640, 384),
+        (768, 512),
+        (576, 448),
+        (512, 512),
+        (448, 576),
+        (512, 768),
+        (384, 640),
         (384, 768),
         (320, 768),
     ],
@@ -83,14 +101,41 @@ def find_nearest_length_bucket(length, stride=1):
     return max(valid_buckets)
 
 
+import signal as _signal
+
+
+class _VideoReadTimeout(Exception):
+    pass
+
+
+def _video_read_timeout_handler(signum, frame):
+    raise _VideoReadTimeout("video read exceeded HELIOS_READ_TIMEOUT")
+
+
 def read_cut_crop_and_resize(
     video_path, f_prime, h_prime, w_prime, stride=1, start_frame=None, end_frame=None, crop=None
 ):
     frame_indices = list(range(start_frame, end_frame, stride))
     assert len(frame_indices) == f_prime
 
-    vr = PyVideoReader(video_path, threads=0)  # 0 means auto (let ffmpeg pick the optimal number)
-    frames = torch.from_numpy(vr.get_batch(frame_indices)).float()
+    # Per-clip read timeout: some corrupt videos hang PyVideoReader/ffmpeg forever (no exception),
+    # stalling the whole encode. SIGALRM turns the hang into an exception __getitem__ catches, so the
+    # clip is skipped (None) instead of freezing the worker. Opt-in via HELIOS_READ_TIMEOUT seconds.
+    _to = int(os.environ.get("HELIOS_READ_TIMEOUT", "0"))
+    _armed = False
+    if _to > 0:
+        try:
+            _signal.signal(_signal.SIGALRM, _video_read_timeout_handler)
+            _signal.alarm(_to)
+            _armed = True
+        except (ValueError, OSError):
+            _armed = False  # not the main thread of this (worker) process -> skip the timeout
+    try:
+        vr = PyVideoReader(video_path, threads=0)  # 0 means auto (let ffmpeg pick the optimal number)
+        frames = torch.from_numpy(vr.get_batch(frame_indices)).float()
+    finally:
+        if _armed:
+            _signal.alarm(0)
 
     frames = (frames / 127.5) - 1
     video = frames.permute(0, 3, 1, 2)
@@ -152,6 +197,7 @@ class BucketedFeatureDataset(Dataset):
         single_height=384,
         single_width=640,
         multi_res=False,
+        assume_videos_exist=False,
         id_token: Optional[str] = None,
     ):
         self.stride = stride
@@ -164,6 +210,9 @@ class BucketedFeatureDataset(Dataset):
         self.single_length = single_length
         self.single_num_frame = single_num_frame
         self.multi_res = multi_res
+        # Skip the (very slow on beegfs, O(#files)) os.walk existence scan when the caller knows all
+        # manifest videos are present. Turns a ~10min+ build over 280k files into a pure-parse pass.
+        self.assume_videos_exist = assume_videos_exist
         self.id_token = id_token or ""
         self._epoch = 0
 
@@ -221,39 +270,30 @@ class BucketedFeatureDataset(Dataset):
         with open(json_file, "r") as f:
             data = json.load(f)
 
-        print(f"Scanning video folder: {video_folder}")
-        existing_videos = set()
-        for root, dirs, files in os.walk(video_folder):
-            for file in files:
-                if file.endswith(".mp4"):
-                    rel_path = os.path.relpath(os.path.join(root, file), video_folder)
-                    existing_videos.add(rel_path)
-        print(f"Found {len(existing_videos)} video files")
+        existing_videos = None
+        if self.assume_videos_exist:
+            print(f"assume_videos_exist=True -> skipping os.walk existence scan of {video_folder}")
+        else:
+            print(f"Scanning video folder: {video_folder}")
+            existing_videos = set()
+            for root, dirs, files in os.walk(video_folder):
+                for file in files:
+                    if file.endswith(".mp4"):
+                        rel_path = os.path.relpath(os.path.join(root, file), video_folder)
+                        existing_videos.add(rel_path)
+            print(f"Found {len(existing_videos)} video files")
 
-        df = pd.DataFrame(
-            [
-                {
-                    "cut": item["cut"],
-                    "crop": item["crop"],
-                    "path": item["path"],
-                    "num_frames": item["num_frames"],
-                    "width": item["resolution"]["width"],
-                    "height": item["resolution"]["height"],
-                    "fps": item["fps"],
-                    "cap": item["cap"],
-                }
-                for item in data
-            ]
-        )
-
+        # Iterate the raw manifest dicts directly. Building a DataFrame + df.iterrows() over ~260k
+        # records took ~15min (pure overhead -> a big cost on every node8 restart). The loop below only
+        # reads path/cut/crop/fps/cap, all present in each raw dict, so no DataFrame is needed.
         samples = []
         buckets = defaultdict(list)
         sample_idx = 0
 
-        print(f"Processing {len(df)} records from {json_file} with stride={self.stride}...")
-        for i, row in df.iterrows():
+        print(f"Processing {len(data)} records from {json_file} with stride={self.stride}...")
+        for i, row in enumerate(data):
             if i % 10000 == 0:
-                print(f"  Processed {i}/{len(df)} records")
+                print(f"  Processed {i}/{len(data)} records")
 
             video_file = (
                 row["path"]
@@ -261,7 +301,7 @@ class BucketedFeatureDataset(Dataset):
                 .replace("videos_clip_v2_20241111/", "")
                 .replace("videos_clip_v4_20241111/", "")
             )
-            if video_file not in existing_videos:
+            if existing_videos is not None and video_file not in existing_videos:
                 print("bad video!")
                 continue
             video_path = os.path.join(video_folder, video_file)

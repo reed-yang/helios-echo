@@ -74,6 +74,22 @@ class ModelConfig:
     lora_exclude_modules: list = field(default_factory=list)
     # ---- Other ----
     train_norm_layers: bool = field(default=False)
+    # Full fine-tune (no LoRA): unfreeze the ENTIRE transformer and skip add_adapter. Requires a
+    # DeepSpeed ZeRO launcher (14B full params + Adam states won't fit under plain DDP). Checkpoints
+    # are saved/restored via accelerator.save_state/load_state (DeepSpeed engine) + a consolidated
+    # rank0 `transformer/` HF dir for inference. Set lora_layers=null and lora_target_modules=[].
+    is_full_finetune: bool = field(default=False)
+    # Sub-scope for is_full_finetune. "all" (default) = current behavior: unfreeze EVERY param.
+    # "base_linear_lora_patch" = hybrid: full-train all params EXCEPT (a) norm/AdaLN -> frozen and
+    # (b) patch_embedding -> kept frozen with a LoRA r=lora_rank adapter attached (only its LoRA is
+    # trainable). memory patches (patch_short/mid/long) stay full-trainable via
+    # is_train_full_multi_term_memory_patchg. Backward-compatible: only active when explicitly set.
+    full_finetune_scope: str = field(default="all")
+    # For full_finetune_scope="base_linear_lora_patch": path to a pytorch_lora_weights-style
+    # safetensors holding ONLY the patch_embedding LoRA (e.g. produced by
+    # tools/merge_lora_partial_for_helios.py). Loaded into the injected adapter at model build so the
+    # run continues an existing patch_embedding LoRA instead of a fresh gaussian init. Empty = fresh.
+    patch_embedding_lora_init_path: Optional[str] = field(default="")
     bnb_quantization_config_path: Optional[str] = field(default=None)
     # ----- Stage 3 -----
     critic_lora_name_or_path: Optional[str] = field(default=None)
@@ -136,6 +152,12 @@ class TrainingConfig:
     checkpoints_total_limit: Optional[int] = field(default=None)
     resume_from_checkpoint: Optional[str] = field(default=None)
     save_checkpoints_custom: bool = field(default=False)
+    # Skip the StatefulDataLoader DCP save/load (torch.distributed.checkpoint). Its gather_object NCCL
+    # collective reliably crashes with "NCCL Error 2: unhandled system error" on MULTI-NODE jobs on this
+    # cluster. Disabling it makes checkpoints robust; the only cost is that resume restarts the dataloader
+    # iterator (data order) instead of restoring the exact mid-epoch position — immaterial for SGD. The
+    # model+optimizer are still fully saved/restored by accelerator.save_state/load_state.
+    skip_dataloader_dcp: bool = field(default=False)
     # ---- Optimizer ----
     learning_rate: float = field(default=2e-4)
     scale_lr: bool = field(default=False)

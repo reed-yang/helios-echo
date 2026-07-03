@@ -91,6 +91,19 @@ def _flow_loss(
         # loss = loss * (batch_size / total_sample_count)
         assert loss.requires_grad, f"Loss should have gradient! Got {loss.requires_grad}"
         assert loss.grad_fn is not None, "Loss should have grad_fn!"
+
+        # Full fine-tune + DeepSpeed ZeRO-2: every trainable param MUST receive a gradient or ZeRO's
+        # reduction hook crashes on a None grad ('NoneType' has no attribute 'view'). On t2v
+        # microbatches (is_random_drop) the history / multi-term-memory params aren't exercised, so
+        # their grad would stay None. Add a zero-valued touch over all trainable params -> each gets a
+        # (zero) gradient regardless of which conditional path ran. No effect on the learning signal.
+        # Also apply the zero-touch when DDP find_unused_parameters is disabled: on is_random_drop
+        # microbatches some history/multi-term params go ungraded, which DDP (find_unused=False) rejects.
+        # The zero touch gives every trainable param a (zero) gradient -> safe to disable find_unused.
+        if getattr(args.model_config, "is_full_finetune", False) or __import__("os").environ.get("HELIOS_DDP_FIND_UNUSED", "1") == "0":
+            touch = sum(p.sum() for p in transformer.parameters() if p.requires_grad)
+            loss = loss + 0.0 * touch
+
         accelerator.backward(loss)
 
         if args.training_config.use_error_recycling:
@@ -161,7 +174,10 @@ def _flow_loss(
     del model_pred
     del target
     del loss
-    free_memory()
+    # Per-step gc.collect()+empty_cache() is a hot-loop stall (defeats the CUDA caching allocator).
+    # Gated so we can A/B it: HELIOS_THROTTLE_FREE=1 skips it. Default = original behavior.
+    if __import__("os").environ.get("HELIOS_THROTTLE_FREE", "0") != "1":
+        free_memory()
 
     return logs
 

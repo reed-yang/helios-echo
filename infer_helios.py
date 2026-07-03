@@ -2,8 +2,11 @@ import importlib
 import os
 
 
-os.environ["HF_ENABLE_PARALLEL_LOADING"] = "yes"
-os.environ["HF_PARALLEL_LOADING_WORKERS"] = "8"
+# Default to parallel safetensors loading, but respect a pre-set value so callers can disable it.
+# (Many concurrent single-GPU workers each spawning 8 loader subprocs swamps a shared filesystem;
+#  such callers export HF_ENABLE_PARALLEL_LOADING=no to load with a single process per worker.)
+os.environ.setdefault("HF_ENABLE_PARALLEL_LOADING", "yes")
+os.environ.setdefault("HF_PARALLEL_LOADING_WORKERS", "8")
 
 import argparse
 import time
@@ -260,6 +263,10 @@ def main():
     scheduler = HeliosScheduler.from_pretrained(
         args.base_model_path,
         subfolder="scheduler",
+        # Wan2.2 base ships a UniPC config with no `stages` key -> HeliosScheduler defaults to
+        # stages=3 (pyramid), which needs a stage_index that plain Stage-1 sampling never passes
+        # (KeyError: None). Force single-stage flow-matching unless Stage-2 pyramid is enabled.
+        stages=3 if args.is_enable_stage2 else 1,
     )
     pipe = HeliosPipeline.from_pretrained(
         args.base_model_path,
@@ -371,6 +378,9 @@ def main():
                         interpolate_time_list=interpolate_time_list,
                     ).frames[0]
                 except Exception:
+                    import traceback
+                    print(f"[infer] generation FAILED for idx={idx}:", flush=True)
+                    traceback.print_exc()
                     continue
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
@@ -429,6 +439,9 @@ def main():
                         interpolate_time_list=interpolate_time_list,
                     ).frames[0]
                 except Exception:
+                    import traceback
+                    print(f"[infer] generation FAILED for idx={idx}:", flush=True)
+                    traceback.print_exc()
                     continue
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
@@ -498,6 +511,9 @@ def main():
                         interpolate_time_list=interpolate_time_list,
                     ).frames[0]
                 except Exception:
+                    import traceback
+                    print(f"[infer] generation FAILED for idx={idx}:", flush=True)
+                    traceback.print_exc()
                     continue
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)

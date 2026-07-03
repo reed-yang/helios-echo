@@ -1,0 +1,1 @@
+/mnt/beegfs/dataset/video_single_24FPS/latents_wan22_384x640_full/d94c2e9174879db9eaf31e0f34a48202_0-166_161_384_640.pt

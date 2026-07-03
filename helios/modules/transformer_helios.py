@@ -1089,7 +1089,10 @@ class HeliosTransformer3DModel(
         weight = another_layer.weight.detach().clone()
         bias = another_layer.bias.detach().clone()
 
-        weight = weight[:, :16, :, :, :]
+        # Copy only the video-latent input channels of the source conv (patch_embedding)
+        # into the multi-term-memory patch convs. Use the destination's in_channels so this
+        # works for any base VAE (Wan2.1: 16ch, Wan2.2-TI2V-5B: 48ch) instead of a hardcoded 16.
+        weight = weight[:, : self.patch_short.in_channels, :, :, :]
 
         sd = {
             "patch_short.weight": weight.clone(),

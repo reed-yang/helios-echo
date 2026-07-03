@@ -150,6 +150,18 @@ def score_hpsv3(rows: List[EvalRow], args: argparse.Namespace, cache_root: pathl
     from hpsv3.model.qwen2vl_trainer import Qwen2VLRewardModelBT
 
     if not getattr(Qwen2VLRewardModelBT, "_rt_rl_compat_init", False):
+        # transformers>=5 forwards use_cache into __init__ and may omit a top-level
+        # hidden_size on the config; mirror metrics/hpsv3_metric.py's compat_init.
+        original_init = Qwen2VLRewardModelBT.__init__
+
+        def compat_init(self, config, *init_args, **init_kwargs):
+            init_kwargs.pop("use_cache", None)
+            if not hasattr(config, "hidden_size") and hasattr(config, "text_config"):
+                config.hidden_size = config.text_config.hidden_size
+            return original_init(self, config, *init_args, **init_kwargs)
+
+        Qwen2VLRewardModelBT.__init__ = compat_init
+
         original_forward = Qwen2VLRewardModelBT.forward
 
         def compat_forward(self, *forward_args, **forward_kwargs):

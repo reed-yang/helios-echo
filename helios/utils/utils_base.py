@@ -187,6 +187,17 @@ def save_extra_components(args, model=None, model_state_dict=None, output_dir=No
                     for k, v in patch_module.state_dict().items():
                         state_dict[f"{p}.{k}"] = v.detach().clone().cpu()
 
+    # 1b. Save patch_embedding when it is FULLY fine-tuned (is_train_full_patch_embedding). The PEFT
+    # LoRA state-dict does not include it and save_lora_weights won't capture it, so persist it here.
+    if getattr(args.training_config, "is_train_full_patch_embedding", False):
+        if use_state_dict:
+            for k, v in model_state_dict.items():
+                if k.startswith("patch_embedding."):
+                    state_dict[k] = v.detach().clone().cpu() if torch.is_tensor(v) else v
+        elif hasattr(model, "patch_embedding"):
+            for k, v in model.patch_embedding.state_dict().items():
+                state_dict[f"patch_embedding.{k}"] = v.detach().clone().cpu()
+
     # 2. Save LoRA layers from all transformer blocks
     if args.training_config.restrict_self_attn and args.training_config.is_train_restrict_lora:
         if use_state_dict:
@@ -272,6 +283,16 @@ def load_extra_components(args, model, checkpoint_path):
                     print(f"  Missing keys in {p_name}: {load_info.missing_keys}")
                 if load_info.unexpected_keys:
                     print(f"  Unexpected keys in {p_name}: {load_info.unexpected_keys}")
+
+        # Load fully fine-tuned patch_embedding if present in the checkpoint.
+        pe_keys = [k for k in state_dict.keys() if k.startswith("patch_embedding.")]
+        if pe_keys and hasattr(model, "patch_embedding"):
+            pe_state = {k.replace("patch_embedding.", ""): v for k, v in state_dict.items() if k.startswith("patch_embedding.")}
+            info = model.patch_embedding.load_state_dict(pe_state, strict=False)
+            loaded_keys.update(pe_keys)
+            print(f"Loaded {len(pe_keys)} parameters for patch_embedding")
+            if info.unexpected_keys:
+                print(f"  Unexpected keys in patch_embedding: {info.unexpected_keys}")
 
     # Load LoRA layers
     lora_keys_count = 0
