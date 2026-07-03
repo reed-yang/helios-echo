@@ -26,7 +26,7 @@ export MASTER_PORT=29513
 export WORLD_SIZE=$SLURM_NTASKS
 echo "train_l368c_sm: ntasks=$SLURM_NTASKS master=$MASTER_ADDR:$MASTER_PORT config=$CONFIG nodelist=$SLURM_JOB_NODELIST"
 
-srun --kill-on-bad-exit=1 bash -c '
+srun --mpi=none --kill-on-bad-exit=1 bash -c '
   export PATH='"$PY_ENV"'/bin:$PATH
   export HF_HOME=/mnt/beegfs/xiangbo/.cache/huggingface
   export PYTHONPATH='"$REPO"':${PYTHONPATH:-}
