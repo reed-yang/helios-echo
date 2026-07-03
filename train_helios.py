@@ -1082,6 +1082,22 @@ def main(args):
             accelerator.load_state(path, load_kwargs={"weights_only": False})
             if args.training_config.is_train_dmd:
                 critic_accelerator.load_state(os.path.join(path, "critic"), load_kwargs={"weights_only": False})
+
+            # HELIOS_FORCE_LR=1: load_state restores the checkpoint's optimizer/scheduler state,
+            # including base_lrs — a changed training_config.learning_rate is silently discarded
+            # (the next scheduler.step() rewrites param_groups from the restored base_lrs). Re-apply
+            # the config LR to both so continue-runs can lower LR without a fresh optimizer.
+            if os.environ.get("HELIOS_FORCE_LR", "0") == "1":
+                forced_lr = args.training_config.learning_rate
+                for group in optimizer.param_groups:
+                    group["lr"] = forced_lr
+                    if "initial_lr" in group:
+                        group["initial_lr"] = forced_lr
+                base_sched = getattr(lr_scheduler, "scheduler", lr_scheduler)
+                if hasattr(base_sched, "base_lrs"):
+                    base_sched.base_lrs = [forced_lr] * len(base_sched.base_lrs)
+                accelerator.print(f"[HELIOS_FORCE_LR] optimizer/scheduler lr forced to {forced_lr}")
+
             global_step = int(os.path.basename(path).split("-")[1])
 
             initial_global_step = global_step

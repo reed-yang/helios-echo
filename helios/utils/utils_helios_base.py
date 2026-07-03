@@ -187,6 +187,8 @@ def _flow_loss(
 
 def downsample_corrupt(model_input, downsample_min_corrupt_ratio, downsample_max_corrupt_ratio):
     corrupt_ratio = random.uniform(downsample_min_corrupt_ratio, downsample_max_corrupt_ratio)
+    if __import__("os").environ.get("HELIOS_DEBUG_BRANCH") == "1":
+        print(f"[DBG-BRANCH] downsample_corrupt hit: ratio={corrupt_ratio:.3f}", flush=True)
 
     is_5d = model_input.ndim == 5
 
@@ -697,6 +699,8 @@ def prepare_stage1_clean_input_from_latents(
             if random_drop_i2v_ratio != 0 and torch.rand(1).item() <= random_drop_i2v_ratio:
                 total_drop = max(0, hist_seq_len - 1)
                 is_drop_triggered = True
+                if __import__("os").environ.get("HELIOS_DEBUG_BRANCH") == "1":
+                    print(f"[DBG-BRANCH] i2v drop hit: total_drop={total_drop}", flush=True)
             elif random_drop_v2v_ratio != 0 and torch.rand(1).item() <= random_drop_v2v_ratio:
                 max_windows = hist_seq_len // latent_window_size
                 tail_num = hist_seq_len % latent_window_size
@@ -839,6 +843,23 @@ def prepare_stage1_noise_input(
             # for downsample
             downsample_min_corrupt_ratio=args.training_config.downsample_min_corrupt_ratio_history,
             downsample_max_corrupt_ratio=args.training_config.downsample_max_corrupt_ratio_history,
+        )
+
+    # Easy Anti-Drifting saturation for the flow-matching (Stage-1/2) path. Upstream only wires
+    # add_saturation_to_history_latents into the DMD path (utils_helios_post.py); per the author's
+    # recommendation (correct.yaml / issue #38) we mirror it here, after corruption, same as post.
+    if args.training_config.is_add_saturation and latents_history_short is not None:
+        if __import__("os").environ.get("HELIOS_DEBUG_BRANCH") == "1":
+            print("[DBG-BRANCH] stage1 saturation applied", flush=True)
+        latents_history_short, latents_history_mid, latents_history_long = add_saturation_to_history_latents(
+            latents_history_short,
+            latents_history_mid,
+            latents_history_long,
+            latent_window_size,
+            is_keep_x0=True,
+            saturation_ratio_min=args.training_config.saturation_ratio_min,
+            saturation_ratio_max=args.training_config.saturation_ratio_max,
+            saturation_clean_prob=args.training_config.saturation_ratio_clean_prob,
         )
 
     if args.training_config.corrupt_model_input:
