@@ -31,6 +31,26 @@ if squeue -u "$USER" -h -o "%j" 2>/dev/null | grep -qx "prev_${PREFIX}_${STEP}";
   echo "preview: infer job prev_${PREFIX}_${STEP} already queued/running -> skip"; exit 0
 fi
 
+# Atomic submit lock: the watchdog and the 2h monitor cron both call this script and
+# have raced past the squeue check within the same second (duplicate prev_* jobs
+# 4284/4285 and 4286/4287). mkdir is atomic on beegfs; a lock older than 90 min is
+# stale (crashed submitter) and is reclaimed.
+LOCK="$RUNS/preview_merged/.submit_lock_${PREFIX}_${STEP}"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +90 2>/dev/null)" ]; then
+    echo "preview: reclaiming stale lock $LOCK"
+    rmdir "$LOCK" 2>/dev/null || true
+    mkdir "$LOCK" 2>/dev/null || { echo "preview: lock re-taken -> skip"; exit 0; }
+  else
+    echo "preview: another submitter holds $LOCK -> skip"; exit 0
+  fi
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+# re-check under the lock (the racing submitter may have just sbatch'ed)
+if squeue -u "$USER" -h -o "%j" 2>/dev/null | grep -qx "prev_${PREFIX}_${STEP}"; then
+  echo "preview: infer job prev_${PREFIX}_${STEP} appeared under lock -> skip"; exit 0
+fi
+
 # 1) inline CPU merge (only if not already merged)
 if [ ! -d "$MERGED/transformer" ]; then
   echo "preview: merging $CKPT -> $MERGED (inline CPU)"

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=helios_i240
-#SBATCH --nodes=5
-#SBATCH --nodelist=mc-node01,c-node03,c-node04,c-node05,c-node06
+#SBATCH --nodes=3
+#SBATCH --nodelist=mc-node01,c-node03,c-node04
 #SBATCH --ntasks-per-node=8
 #SBATCH --gres=gpu:h200:8
 #SBATCH --cpus-per-task=8
@@ -35,6 +35,8 @@ srun --mpi=none --kill-on-bad-exit=1 bash -c '
   export TOKENIZERS_PARALLELISM=false
   # ---- speed knobs (accuracy-neutral) ----
   export HELIOS_THROTTLE_FREE=1
+  # CONTINUE (2026-07-07): resume from checkpoint-4000 (lr 5e-5) but force config lr 3e-5.
+  export HELIOS_FORCE_LR=1
   export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,garbage_collection_threshold:0.9"
   export NCCL_DEBUG=WARN NCCL_P2P_LEVEL=NVL
   export RANK=$SLURM_PROCID

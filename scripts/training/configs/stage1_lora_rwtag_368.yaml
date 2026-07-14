@@ -1,0 +1,196 @@
+output_dir: /mnt/beegfs/xiangbo/helios_runs/stage1_lora_rwtag_368
+logging_dir: logs
+seed: 44
+
+
+report_to:
+  tracker_name: Helios-Train
+  wandb_name: stage1_lora_rwtag_368
+  report_to: wandb
+
+
+data_config:
+  # ---- Base ----
+  use_shuffle: true
+  pin_memory: true
+  persistent_workers: true
+  force_rebuild: true
+  single_res: true
+  single_height: 368
+  single_width: 640
+  dataloader_num_workers: 8
+  prefetch_factor: 2
+  caption_dropout_p: 0
+  id_token: ""
+  # ---- Stage 1 ----
+  use_stage1_dataset: true
+  instance_data_root:
+    # reweight_v2 "rwtag" mix, MATERIALIZED as symlink folders (built by
+    # scripts/data/build_reweight_tree_v2.py). Multipliers (user-specified 2026-07-06):
+    # realsource x1, music_performance x2, animal x10, jesus x30, genesis x50,
+    # hatching(+extension) x200. spatialVID/sekai/ikea/vsingle EXCLUDED.
+    # Total 154,015 samples -> 1,283.5 optimizer steps @ global batch 120.
+    # Every caption carries a leading dataset tag ("<hatching*>" etc.): the launcher sets
+    # HELIOS_TAG_EMBED_DIR so the dataloader swaps in re-encoded UMT5 sidecar embeds
+    # (scripts/data/encode_tag_sidecars.py) - the .pt latents themselves are untouched.
+    - "/mnt/beegfs/xiangbo/helios_data/reweight_v2/realsource"
+    - "/mnt/beegfs/xiangbo/helios_data/reweight_v2/music_performance"
+    - "/mnt/beegfs/xiangbo/helios_data/reweight_v2/animal"
+    - "/mnt/beegfs/xiangbo/helios_data/reweight_v2/demo_jesus"
+    - "/mnt/beegfs/xiangbo/helios_data/reweight_v2/demo_genesis"
+    - "/mnt/beegfs/xiangbo/helios_data/reweight_v2/demo_hatching"
+
+
+model_config:
+  # ---- Path ----
+  pretrained_model_name_or_path: "/mnt/beegfs/yuheng/Helios/BestWishYSH/Helios-Distilled"
+  # Local Helios-Base snapshot dir; the LoRA adapter itself comes from resume (checkpoint-19500).
+  transformer_model_name_or_path: "/mnt/beegfs/xiangbo/.cache/huggingface/hub/models--BestWishYsh--Helios-Base/snapshots/21cf91da9cae0270a9405000c2e798f83770b1dd"
+  subfolder: "transformer_init"
+  load_checkpoints_custom: false
+  load_dcp: false
+  # ---- Vae ----
+  upcast_vae: true
+  enable_slicing: false
+  enable_tiling: false
+  # ---- LoRA r128 (MUST match stage1_lora_cfr_368 exactly for adapter state-dict compat) ----
+  lora_rank: 128
+  lora_alpha: 128.0
+  lora_dropout: 0.0
+  lora_layers: "all-linear"
+  lora_exclude_modules:
+    - down
+    - up
+  # ---- Other ----
+  train_norm_layers: false
+
+
+validation_config:
+  # Built-in validation DISABLED (external eval handles inference). Keep a prompt so config validates.
+  validation_steps: 100000000
+  validation_height: 368
+  validation_width: 640
+  validation_max_num_frames: 99
+  validation_prompts:
+    - "A stylish woman walks down a Tokyo street filled with warm glowing neon and animated city signage."
+  validation_guidance_scale: 5.0
+  validation_latent_window_size:
+    - 9
+  num_validation_videos: 1
+  num_inference_steps: 50
+  # ---- Dynamic Shifting ----
+  use_dynamic_shifting: true
+  time_shift_type: "exponential"
+  first_step_valid: false
+
+
+training_config:
+  # ---- Environment ----
+  allow_tf32: false
+  gradient_checkpointing: true
+  enable_xformers_memory_efficient_attention: false
+  enable_npu_flash_attention: false
+  upcast_before_saving: false
+  offload: false
+  mixed_precision: "bf16"
+  # ---- Training Resource ----
+  # Continue-train from stage1_lora_cfr_368_correct/checkpoint-19500 (same baseline as the v1
+  # reweight run -> direct A/B at matching data budget) on the TAGGED reweight_v2 mix. Recipe
+  # flags identical to stage1_lora_cfr_368_correct (Blur/I2V drop/Saturation). output_dir is
+  # seeded by the launcher with a symlink checkpoint-19500 so resume_from_checkpoint=latest works.
+  # GLOBAL BATCH 120 = 1 node (c-node07; single-node only - its CROSS-node NCCL wedges, in-node
+  # NVLink is fine) x 8 GPU x bs3 x accum5. 154,015 samples / 120 = 1,283.5 steps for one epoch:
+  # 19500 + 1284 = 20784 (final save = checkpoint-20784-final). Checkpoint every 200 for eval
+  # granularity (~7 ckpts incl. final).
+  max_train_steps: 20784
+  train_batch_size: 3           # per-GPU; x8 GPU x accum5 = global batch 120 (1 node)
+  gradient_accumulation_steps: 5
+  checkpointing_steps: 200
+  checkpoints_total_limit: 30
+  resume_from_checkpoint: "latest"
+  save_checkpoints_custom: false
+  skip_dataloader_dcp: true   # resume is world-size agnostic; no exact dataloader pos
+  scale_lr: false
+  # ---- Optimizer ----
+  learning_rate: 1e-5           # same as the correct run; enforced on resume via HELIOS_FORCE_LR=1
+  lr_scheduler: "constant_with_warmup"   # resume step 19500 >> warmup 500 -> effectively constant 1e-5
+  lr_warmup_steps: 500
+  optimizer: "adamw"
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_weight_decay: 1e-04
+  adam_epsilon: 1e-08
+  max_grad_norm: 1.0
+  weighting_scheme: "logit_normal"
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+  # ---- Dynamic Shifting Parameters ----
+  use_dynamic_shifting: false
+  time_shift_type: "exponential"
+  base_seq_len: 256
+  max_seq_len: 4096
+  base_shift: 0.5
+  max_shift: 1.15
+  # ---- VAE Decode Parameters ----
+  vae_decode_type: "default"
+  # ---- EMA Parameters ----
+  use_ema: false
+  use_ema_validation: false
+  ema_decay: 0.999
+  ema_start_step: 250
+  ema_zero3_port: 10543
+  ema_deepspeed_config_file: "scripts/accelerate_configs/zero3.json"
+  # ---- Stage 1 Parameters ----
+  is_enable_stage1: true
+  history_sizes:
+    - 16
+    - 2
+    - 1
+  latent_window_size:
+    - 9
+  is_random_drop: true
+  random_drop_i2v_ratio: 0.1    # RECIPE: train the I2V format (issue #38); effective ~6% given t2v 0.4
+  random_drop_v2v_ratio: 0.4
+  random_drop_t2v_ratio: 0.4
+  #
+  corrupt_model_input: false
+  corrupt_mode_model_input: "noise"
+  corrupt_mode_prob_model_input: 0.9
+  is_frame_independent_corrupt_model_input: true
+  is_chunk_independent_corrupt_model_input: false
+  noise_corrupt_ratio_model_input: 0.33333333333333
+  noise_corrupt_clean_prob_model_input: 0.1
+  downsample_min_corrupt_ratio_model_input: 0.9
+  downsample_max_corrupt_ratio_model_input: 1.0
+  corrupt_history: true
+  corrupt_mode_history: "random"        # RECIPE: enables Blur (downsample) branch
+  corrupt_mode_prob_history: 0.8889     # P(noise)=0.9*0.8889~=0.8, P(blur)~=0.1, P(clean)=0.1
+  is_frame_independent_corrupt_history: true
+  is_chunk_independent_corrupt_history: false
+  noise_corrupt_ratio_history_short: 0.33333333333333
+  noise_corrupt_ratio_history_mid: 0.33333333333333
+  noise_corrupt_ratio_history_long: 0.33333333333333
+  noise_corrupt_clean_prob_history: 0.1
+  downsample_min_corrupt_ratio_history: 0.9
+  downsample_max_corrupt_ratio_history: 1.0
+  # ---- RECIPE: Easy Anti-Drifting Saturation ----
+  is_add_saturation: true
+  saturation_ratio_clean_prob: 0.1
+  saturation_ratio_min: 0.3
+  saturation_ratio_max: 1.7
+  #
+  is_amplify_history: false
+  history_scale_mode: "per_head"
+  #
+  is_train_full_patch_embedding: false
+  is_train_lora_patch_embedding: true
+  has_multi_term_memory_patch: true
+  is_train_full_multi_term_memory_patchg: true
+  is_train_lora_multi_term_memory_patchg: false
+  zero_history_timestep: true
+  guidance_cross_attn: true
+  restrict_self_attn: false
+  is_train_restrict_lora: false
+  restrict_lora: false
+  restrict_lora_rank: 128

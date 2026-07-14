@@ -198,6 +198,87 @@ class BucketedFeatureDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _apply_tag_embed_override(self, feature_data, file_path):
+        """Override prompt embeds with tagged-caption sidecars (reweight_v2 run).
+
+        Active only when HELIOS_TAG_EMBED_DIR is set. Sidecars (built by
+        scripts/data/encode_tag_sidecars.py) hold the UMT5 embedding of
+        "<dataset*>\n<caption>" trimmed to seq_len; they are keyed by the
+        RESOLVED source basename, so every reweight symlink replica
+        (*_repK_*) maps to the same sidecar. A missing sidecar raises: this
+        run must never silently train on an untagged caption (the generic
+        retry loop in __getitem__ will surface the path in a .txt breadcrumb
+        and the error spam makes the failure obvious).
+        """
+        tag_dir = os.environ.get("HELIOS_TAG_EMBED_DIR")
+        if not tag_dir:
+            return feature_data
+        sidecar_path = os.path.join(tag_dir, os.path.basename(os.path.realpath(file_path)))
+        sidecar = torch.load(sidecar_path, map_location="cpu", weights_only=False)
+        emb = sidecar["prompt_embed"]
+        max_len = 512
+        padded = torch.cat([emb, emb.new_zeros(max_len - emb.shape[0], emb.shape[1])], dim=0)
+        for key in list(feature_data.keys()):
+            if key == "prompt_embed" or key.startswith("prompt_embed_"):
+                feature_data[key] = padded
+        if "event_prompt_embeds" in feature_data:
+            # demo multi-event .pt in this mix all hold exactly 1 event whose text
+            # equals prompt_raw, so the tagged single-prompt embed substitutes 1:1.
+            n_events = feature_data["event_prompt_embeds"].shape[0]
+            if n_events != 1:
+                raise ValueError(f"{file_path}: {n_events} events; tag override only supports 1")
+            feature_data["event_prompt_embeds"] = padded.unsqueeze(0)
+        feature_data["prompt_raw"] = sidecar["prompt_raw_tagged"]
+        return feature_data
+
+    def _apply_text_sidecar(self, feature_data, file_path):
+        """cap-v3 text/embedding sidecar override (2026-07-10, plan: helios_organized
+        workspace/doc/plans/PLAN_CAPTION_CLEANUP_RECAPTION.md §6, approved option B).
+
+        Active only when HELIOS_TEXT_SIDECAR_DIR is set (":"-separated dirs, first
+        hit wins). A sidecar <dir>/<basename of resolved .pt> holds
+        {"prompt_raw": str, "prompt_embed": (L,4096) trimmed to true length}.
+        The embed is re-padded to 512 and replaces every prompt_embed* key (and a
+        single-event event_prompt_embeds), mirroring _apply_tag_embed_override.
+        Unlike the tag override, a MISSING sidecar silently falls back to the
+        in-.pt embed — rollout is incremental: only clips whose caption changed
+        get a sidecar; everything else keeps training on the baked-in cap-v0.
+        Mutually exclusive with HELIOS_TAG_EMBED_DIR (raises if both are set).
+        """
+        sidecar_dirs = os.environ.get("HELIOS_TEXT_SIDECAR_DIR")
+        if not sidecar_dirs:
+            return feature_data
+        if os.environ.get("HELIOS_TAG_EMBED_DIR"):
+            raise ValueError("HELIOS_TEXT_SIDECAR_DIR and HELIOS_TAG_EMBED_DIR are mutually exclusive")
+        base = os.path.basename(os.path.realpath(file_path))
+        sidecar_path = None
+        for d in sidecar_dirs.split(":"):
+            cand = os.path.join(d, base)
+            if os.path.exists(cand):
+                sidecar_path = cand
+                break
+        if sidecar_path is None:
+            return feature_data  # fallback: keep in-.pt text/embed
+        sidecar = torch.load(sidecar_path, map_location="cpu", weights_only=False)
+        emb = sidecar["prompt_embed"]
+        max_len = 512
+        if emb.shape[0] > max_len:
+            raise ValueError(f"{sidecar_path}: embed len {emb.shape[0]} > {max_len}")
+        padded = torch.cat([emb, emb.new_zeros(max_len - emb.shape[0], emb.shape[1])], dim=0)
+        for key in list(feature_data.keys()):
+            if key == "prompt_embed" or key.startswith("prompt_embed_"):
+                feature_data[key] = padded.to(feature_data[key].dtype)
+        if "event_prompt_embeds" in feature_data:
+            n_events = feature_data["event_prompt_embeds"].shape[0]
+            if n_events != 1:
+                raise ValueError(f"{file_path}: {n_events} events; text sidecar only supports 1")
+            feature_data["event_prompt_embeds"] = padded.to(
+                feature_data["event_prompt_embeds"].dtype).unsqueeze(0)
+        feature_data["prompt_raw"] = sidecar["prompt_raw"]
+        if isinstance(feature_data.get("prompt_raws"), list) and len(feature_data["prompt_raws"]) == 1:
+            feature_data["prompt_raws"] = [sidecar["prompt_raw"]]
+        return feature_data
+
     def _pick_prompt_embed(self, feature_data, choice_idx=None):
         """Select the prompt embed for the sampled target chunk.
 
@@ -262,6 +343,8 @@ class BucketedFeatureDataset(Dataset):
                     base_vae_latent = torch.load(base_file_path, map_location="cpu", weights_only=False)["vae_latent"]
 
                 feature_data = torch.load(sample_info["file_path"], map_location="cpu", weights_only=False)
+                feature_data = self._apply_tag_embed_override(feature_data, sample_info["file_path"])
+                feature_data = self._apply_text_sidecar(feature_data, sample_info["file_path"])
                 x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx = (
                     self.prepare_stage1_latent(feature_data["vae_latent"], idx, base_vae_latent)
                 )

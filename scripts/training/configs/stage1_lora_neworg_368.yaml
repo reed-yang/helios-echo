@@ -1,11 +1,11 @@
-output_dir: /mnt/beegfs/xiangbo/helios_runs/stage1_init_cfr368_gb240
+output_dir: /mnt/beegfs/xiangbo/helios_runs/stage1_lora_neworg_368
 logging_dir: logs
 seed: 44
 
 
 report_to:
   tracker_name: Helios-Train
-  wandb_name: stage1_init_cfr368_gb240
+  wandb_name: stage1_lora_neworg_368
   report_to: wandb
 
 
@@ -14,9 +14,9 @@ data_config:
   use_shuffle: true
   pin_memory: true
   persistent_workers: true
-  force_rebuild: true          # required when single_res is enabled (assertion in the dataset)
+  force_rebuild: true
   single_res: true
-  single_height: 368           # 368x640; latent h=46 -> pad_for_3d_conv pads to 48
+  single_height: 368
   single_width: 640
   dataloader_num_workers: 8
   prefetch_factor: 2
@@ -25,10 +25,10 @@ data_config:
   # ---- Stage 1 ----
   use_stage1_dataset: true
   instance_data_root:
-    # 2026-07-09: switched to the reorganized /mnt/beegfs/dataset/helios_organized corpus
-    # (~754k 368x640 latents, same self-contained .pt format: vae_latent + prompt_embed[_short]).
-    # All 12 source folders below; natural (un-reweighted) mix, dominated by
-    # human_extension/human_single/spatialVID (~84% of samples).
+    # NEW canonical tree (/mnt/beegfs/dataset/helios_organized). All sources at their NATURAL count
+    # (no reweight_v1 symlink multipliers). ~753k latents total; at global batch 24 one epoch is
+    # ~31k steps, so a 1000-step continuation samples a small unweighted slice (dominated by the
+    # large sets: human_extension/human_single/spatialVID).
     - "/mnt/beegfs/dataset/helios_organized/animal/latents"
     - "/mnt/beegfs/dataset/helios_organized/extension/latents"
     - "/mnt/beegfs/dataset/helios_organized/genesis/latents"
@@ -45,18 +45,17 @@ data_config:
 
 model_config:
   # ---- Path ----
-  # VAE / text_encoder / tokenizer from the LOCAL Helios-Base snapshot.
-  pretrained_model_name_or_path: "/mnt/beegfs/xiangbo/.cache/huggingface/hub/models--BestWishYsh--Helios-Base/snapshots/21cf91da9cae0270a9405000c2e798f83770b1dd"
-  # STAGE-1-INIT: start the transformer from the RAW Wan2.1-T2V-14B-Diffusers base (architectural adaptation).
-  transformer_model_name_or_path: "/mnt/beegfs/xiangbo/wan_diffusers/Wan2.1-T2V-14B-Diffusers"
-  subfolder: "transformer"
+  pretrained_model_name_or_path: "/mnt/beegfs/yuheng/Helios/BestWishYSH/Helios-Distilled"
+  # Local Helios-Base snapshot dir; the LoRA adapter itself comes from resume (checkpoint-27500).
+  transformer_model_name_or_path: "/mnt/beegfs/xiangbo/.cache/huggingface/hub/models--BestWishYsh--Helios-Base/snapshots/21cf91da9cae0270a9405000c2e798f83770b1dd"
+  subfolder: "transformer_init"
   load_checkpoints_custom: false
   load_dcp: false
   # ---- Vae ----
   upcast_vae: true
   enable_slicing: false
   enable_tiling: false
-  # ---- LoRA r128 / alpha 128 (Stage-1-init spec) ----
+  # ---- LoRA r128 (MUST match stage1_lora_reweight_368 exactly for adapter state-dict compat) ----
   lora_rank: 128
   lora_alpha: 128.0
   lora_dropout: 0.0
@@ -81,6 +80,7 @@ validation_config:
     - 9
   num_validation_videos: 1
   num_inference_steps: 50
+  # ---- Dynamic Shifting ----
   use_dynamic_shifting: true
   time_shift_type: "exponential"
   first_step_valid: false
@@ -89,33 +89,31 @@ validation_config:
 training_config:
   # ---- Environment ----
   allow_tf32: false
-  gradient_checkpointing: true     # MANDATORY: gc-off OOMs (~138 GiB) even at bs2 on H200
+  gradient_checkpointing: true
   enable_xformers_memory_efficient_attention: false
   enable_npu_flash_attention: false
   upcast_before_saving: false
   offload: false
   mixed_precision: "bf16"
   # ---- Training Resource ----
-  # STAGE-1-INIT: Global Batch = 128. 4 nodes x 8 GPU x bs4 x accum1 = 128.
-  # Steps 5500 (init spec).  ckpt every 500.
-  # 2026-07-07 CONTINUE (in-place from checkpoint-4000): extend to 15000 with the correct.yaml
-  # corruptions fully enabled (Blur already on below; + I2V-drop + Saturation added) and lr 3e-5
-  # (was 5e-5) enforced on resume via HELIOS_FORCE_LR=1 in the sbatch. config.json guard rm'd once.
-  # 2026-07-09: 3 nodes (mc-node01,c-node03,c-node04) = 24 GPU. gb240 = bs2 x accum5 x 24 GPU.
-  max_train_steps: 15000
-  train_batch_size: 2              # per-GPU; 3 nodes x 8 GPU x bs2 x accum5 = global batch 240
-  gradient_accumulation_steps: 5
-  checkpointing_steps: 500      # only save at multiples of 500 (per user)
+  # Continue-train from stage1_lora_reweight_368/checkpoint-27500 on the NEW helios_organized tree
+  # for 1000 more steps (27500 -> 28500), saving every 500 (-> checkpoint-28000, checkpoint-28500).
+  # SINGLE NODE c-node05: 8 GPU x bs3 x accum1 = global batch 24. output_dir is seeded by the launcher
+  # with a symlink checkpoint-27500 -> stage1_lora_reweight_368/checkpoint-27500 so
+  # resume_from_checkpoint=latest loads it. Recipe flags identical to stage1_lora_reweight_368.
+  max_train_steps: 28500
+  train_batch_size: 3           # per-GPU; x8 GPU x accum1 = global batch 24 (1 node)
+  gradient_accumulation_steps: 1
+  checkpointing_steps: 500
   checkpoints_total_limit: 30
   resume_from_checkpoint: "latest"
   save_checkpoints_custom: false
-  skip_dataloader_dcp: true        # world-size-agnostic resume
+  skip_dataloader_dcp: true   # resume is world-size agnostic (40->8 ranks); no exact dataloader pos
   scale_lr: false
   # ---- Optimizer ----
-  # 2026-07-07 CONTINUE: lr 5e-5 -> 3e-5 (per user); enforced on resume via HELIOS_FORCE_LR=1.
-  learning_rate: 3e-5
-  lr_scheduler: "constant"         # diffusers "constant" ignores warmup_steps -> pure constant 3e-5
-  lr_warmup_steps: 0
+  learning_rate: 1e-5           # same as the reweight run; enforced on resume via HELIOS_FORCE_LR=1
+  lr_scheduler: "constant_with_warmup"   # resume step 27500 >> warmup 500 -> effectively constant 1e-5
+  lr_warmup_steps: 500
   optimizer: "adamw"
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -151,11 +149,11 @@ training_config:
   latent_window_size:
     - 9
   is_random_drop: true
+  random_drop_i2v_ratio: 0.1    # RECIPE: train the I2V format (issue #38); effective ~6% given t2v 0.4
   random_drop_v2v_ratio: 0.4
   random_drop_t2v_ratio: 0.4
-  random_drop_i2v_ratio: 0.1        # CONTINUE/RECIPE: train the I2V format (issue #38); effective ~6% given t2v 0.4
   #
-  corrupt_model_input: false       # spec p_a = 0.0 (no target/model-input corruption)
+  corrupt_model_input: false
   corrupt_mode_model_input: "noise"
   corrupt_mode_prob_model_input: 0.9
   is_frame_independent_corrupt_model_input: true
@@ -164,22 +162,18 @@ training_config:
   noise_corrupt_clean_prob_model_input: 0.1
   downsample_min_corrupt_ratio_model_input: 0.9
   downsample_max_corrupt_ratio_model_input: 1.0
-  # History corrupt, aligned to the SPEC you gave (p_a=0, p_b=0.8 noise, p_c=0.1 downsample, p_d=0.1 clean;
-  # b sigma in [0,0.33], c downsample strength in [0,0.1] -> resize fraction [0.9,1.0]).
-  # NOTE: the in-repo stage_1_init.yaml uses noise-only (corrupt_mode_history="noise", p_b=0.9, p_c=0).
-  # To revert to that reference, set corrupt_mode_history: "noise".
   corrupt_history: true
-  corrupt_mode_history: "random"           # SPEC: enable noise+downsample mix (was "noise" in repo ref)
-  corrupt_mode_prob_history: 0.8889         # P(noise)=0.9*0.8889=0.8=p_b ; P(downsample)=0.9*0.1111=0.1=p_c
+  corrupt_mode_history: "random"        # RECIPE: enables Blur (downsample) branch
+  corrupt_mode_prob_history: 0.8889     # P(noise)=0.9*0.8889~=0.8, P(blur)~=0.1, P(clean)=0.1
   is_frame_independent_corrupt_history: true
   is_chunk_independent_corrupt_history: false
-  noise_corrupt_ratio_history_short: 0.33333333333333   # b_max = 0.33
+  noise_corrupt_ratio_history_short: 0.33333333333333
   noise_corrupt_ratio_history_mid: 0.33333333333333
   noise_corrupt_ratio_history_long: 0.33333333333333
-  noise_corrupt_clean_prob_history: 0.1     # p_d = 0.1
-  downsample_min_corrupt_ratio_history: 0.9 # c strength in [0,0.1] -> resize fraction [0.9,1.0]
+  noise_corrupt_clean_prob_history: 0.1
+  downsample_min_corrupt_ratio_history: 0.9
   downsample_max_corrupt_ratio_history: 1.0
-  # ---- CONTINUE/RECIPE: Easy Anti-Drifting Saturation (wired into prepare_stage1_noise_input, commit a613974) ----
+  # ---- RECIPE: Easy Anti-Drifting Saturation ----
   is_add_saturation: true
   saturation_ratio_clean_prob: 0.1
   saturation_ratio_min: 0.3
