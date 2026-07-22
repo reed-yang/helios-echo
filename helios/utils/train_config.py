@@ -452,6 +452,24 @@ class TrainingConfig:
     clean_prob: float = field(default=0.2)
     clean_buffer_update_prob: float = field(default=0.1)
 
+    # ---- Evolving memory (Echo-Infinity port) ----
+    # Design: docs/echo-to-helios-migration-design.md ch.2 D2/D13. Arch-shape
+    # keys must also flow into the transformer construction kwargs when the
+    # module lands (single-complete-dict rule, ch.2 D2).
+    is_enable_evolving_memory: bool = field(default=False)
+    memory_num_query_frames: int = field(default=3)
+    memory_enc_num_layers: int = field(default=2)
+    memory_gate_init_bias: float = field(default=0.75)
+    is_amplify_memory: bool = field(default=False)
+    is_train_memory_module: bool = field(default=False)
+    memory_freeze_backbone: bool = field(default=False)
+    memory_learning_rate: float = field(default=5.0e-5)
+    memory_bptt_sections: int = field(default=1)
+    memory_write_source: str = field(default="t0_hidden")
+    memory_single_write_prob: float = field(default=0.0)
+    memory_tf_unroll: bool = field(default=False)
+    memory_unroll_sections: int = field(default=1)
+
 
 @dataclass
 class Args:
@@ -463,3 +481,48 @@ class Args:
     validation_config: ValidationConfig = field(default_factory=ValidationConfig)
     training_config: TrainingConfig = field(default_factory=TrainingConfig)
     logging_dir: str = field(default="logs")
+
+
+def validate_evolving_memory_config(training_config, data_config):
+    """Cross-flag assertions for the evolving-memory feature (design ch.2 D13).
+
+    Pure function so it is unit-testable without running the trainer; a no-op
+    unless the feature is enabled. Called from the train_helios.py config
+    validation block.
+    """
+    tc, dc = training_config, data_config
+    if tc.is_train_memory_module:
+        assert tc.is_enable_evolving_memory, (
+            "is_train_memory_module requires is_enable_evolving_memory"
+        )
+    if not tc.is_enable_evolving_memory:
+        return
+    assert tc.memory_bptt_sections >= 1, "memory_bptt_sections must be >= 1"
+    assert tc.has_multi_term_memory_patch, (
+        "evolving memory conditions on the multi-term patchified history"
+    )
+    if tc.memory_tf_unroll:
+        assert dc.use_stage1_dataset and not dc.use_stage3_dataset, (
+            "TF unroll consumes the stage-1 history-latents dataset"
+        )
+        assert tc.memory_unroll_sections >= 2, (
+            "TF unroll needs >= 2 sections to produce a write->read window"
+        )
+        assert not tc.is_train_dmd and not tc.use_error_recycling, (
+            "TF unroll is a flow-matching regime"
+        )
+    if tc.is_train_dmd:
+        assert tc.is_enable_stage2, (
+            "memory DMD calibration is bound to the stage-2 pyramid rollout; "
+            "the stage-1 rollout path is dead code (utils_helios_post.py:679)"
+        )
+        assert not tc.is_use_gt_history, (
+            "GT-history DMD asserts single-section rollouts; memory needs >= 4"
+        )
+        assert (
+            tc.dmd_num_latent_sections_min is not None
+            and tc.dmd_num_latent_sections_min >= 4
+        ), (
+            "first real eviction write lands at section 2 and its read benefit "
+            "at section 3; shorter rollouts give Enc/gate zero gradient"
+        )

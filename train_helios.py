@@ -37,7 +37,7 @@ from helios.modules.transformer_helios import HeliosTransformer3DModel
 from helios.pipelines.pipeline_helios import HeliosPipeline
 from helios.scheduler.scheduling_helios import HeliosScheduler
 from helios.utils.create_ema_zero3_lora import create_ema_final, gather_zero3ema
-from helios.utils.train_config import Args
+from helios.utils.train_config import Args, validate_evolving_memory_config
 from helios.utils.utils_base import (
     NORM_LAYER_PREFIXES,
     compare_configs,
@@ -2654,6 +2654,8 @@ if __name__ == "__main__":
         assert conf.data_config.force_rebuild, "force_rebuild must be True when single_res is enabled"
 
     # ---------------------- For Wan ----------------------
+    validate_evolving_memory_config(conf.training_config, conf.data_config)
+
     if (
         conf.training_config.is_train_full_multi_term_memory_patchg
         or conf.training_config.is_train_lora_multi_term_memory_patchg
