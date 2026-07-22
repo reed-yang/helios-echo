@@ -47,3 +47,12 @@
 - [x] 调试记录：proj_out 零初始化致输出恒零的测试盲区（见 findings）
 - [x] 决策记录 `docs/specs/2026-07-22-real-model-test-checkpoint-decision.md`：环境 = xiangbo env（yuheng/envs/helios）；P1 冒烟 = Helios-Base + A1@19500 装配臂；P2 anti-drift = Distilled 为主（候选 A1/A2/A3/B/C 全列，含 revisit 条件）
 - 下一步：trainer 接线（PEFT exclude / trainable_modules / extra_components 第 5 节 / param groups）→ P1 真权重冒烟 → pipeline 状态机
+
+## 2026-07-22（AFK 批次：trainer 接线 + P1 真权重冒烟 + 管线状态机）
+
+- [x] trainer 接线（plan: docs/plans/2026-07-22-trainer-wiring-plan.md）：extra_components 第 5 节（enable 门控 + fail-loud 加载）、build_transformer_param_groups 角色化双组、DS DummyOptim 守卫、FORCE_LR 按角色恢复、all-linear 过滤 + 注入后断言、memory_freeze_backbone 通道 — commit 43a32c1
+- [x] P1 真权重冒烟（tests/smoke_real_weights.py，真 Helios-Base 14B @ c-node04 单卡）：13/13 PASS——加载容忍（缺键仅 memory）、真权重关闭路径逐位等价、720-token 读路径、捕获 [1,8640,5120]、Stage-A 式梯度穿 14B，峰值 58.3 GiB
+- [x] P1 抓到并修复真 bug：fp32-kept memory_key_scale × bf16 key 的 dtype 提升 → flash-attn q/k 失配（tiny 测试因整模型 .to(bf16) 而失明；已加强制 fp32-scale 回归测试）— commit fe4063f
+- [x] 管线状态机（plan: docs/plans/2026-07-22-pipeline-state-machine-plan.md）：stage1/2_sample 捕获契约（末调度步、金字塔仅末 stage、逐条目自带 σ）、__call__ 的 M₀ 初始化/k−2 驱逐写/状态导出 — commit ce62bcc
+- [x] 环境归属定论（用户问询）：yuheng 名下的 env 即 xiangbo 全部作业的运行环境（其 sbatch 与 eval_env.sh 均指向之），无需切换；评测采纳其 eval_env.sh 变量 — 决策记录已修订
+- 冒烟门：CPU 套件 39/39；下一批：GPU 端到端 rollout 冒烟（真权重 + enable_evolving_memory ≥5 sections，验证 k=2 首写/队列/导出）+ P2-interim 漂移 A/B 脚手架 + A1@19500 装配臂
