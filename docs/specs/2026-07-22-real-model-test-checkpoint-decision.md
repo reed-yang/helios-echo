@@ -8,9 +8,9 @@ Unit/integration tests for the evolving-memory read path are green on CPU (SDPA)
 - **P1 integration smoke**: off-path bitwise equivalence + capture API on real 14B weights (loading path, shapes, dtype casting, `_keep_in_fp32_modules`).
 - **P2 anti-drift effect A/B** (after the pipeline state machine and Stage A/B/C training land): rollout evals where memory-on vs no-KV slopes are compared.
 
-## Environment (decided)
+## Environment (decided; ownership clarified 2026-07-22)
 
-`/mnt/beegfs/yuheng/miniconda3/envs/helios` — this IS the team/xiangbo environment: `PY_ENV` in `scripts/training/train_stage1_lora_cfr_368_correct.sbatch:26`. All tests to date ran on it (torch 2.10.0+cu128, flash-attn3 kernels verified on c-node03). No alternative considered; a second env would fork kernel/dtype behavior from the training reality.
+`/mnt/beegfs/yuheng/miniconda3/envs/helios` — hosted under yuheng's miniconda but this IS xiangbo's operational environment: his training sbatch (`train_stage1_lora_cfr_368_correct.sbatch:26`, `PY_ENV=...`) and his own eval entry (`/mnt/beegfs/xiangbo/helios_runs/eval_env.sh:2`, `HENV=...`) both point at it; xiangbo has no separate conda env (`/mnt/beegfs/xiangbo/*conda*` absent). All tests to date ran on it (torch 2.10.0+cu128, flash-attn2/3 kernels verified on c-node03/04). For eval runs additionally source his `eval_env.sh` pattern: `HF_HOME=/mnt/beegfs/xiangbo/.cache/huggingface` (where the Helios-Base snapshot lives), `PYTHONPATH` incl. `/mnt/beegfs/xiangbo/eval_pydeps` + DOVER/HPSv3 third-party, `HELIOS_LOCAL_FILES_ONLY=1`.
 
 ## Checkpoint candidates (verified on disk 2026-07-22)
 

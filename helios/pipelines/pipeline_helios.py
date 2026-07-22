@@ -480,6 +480,20 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         return noise
 
+    def get_memory_state(self):
+        """Export the evolving-memory state for streaming/ablation injection
+        (design ch.3 D9: memory-state export, NOT a full generation checkpoint
+        — history buffer, anchor, RNG etc. are not included)."""
+        encoder = getattr(self.transformer, "evolving_memory", None)
+        if encoder is None or encoder.query_state is None:
+            return None
+        return {
+            "M": encoder.query_state.detach().float().cpu(),
+            "queue": [
+                (idx, cap.detach().cpu(), sig) for idx, cap, sig in getattr(self, "_memory_queue", [])
+            ],
+        }
+
     def stage1_sample(
         self,
         latents: torch.Tensor = None,
@@ -507,12 +521,17 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         dmd_sigmas: torch.Tensor = None,
         dmd_timesteps: torch.Tensor = None,
         is_amplify_first_chunk: bool = False,
+        # ------------ Evolving memory ------------
+        memory_tokens: torch.Tensor = None,
+        capture_last_step: bool = False,
         # ------------ Callback ------------
         callback_on_step_end: Optional[callable] = None,
         callback_on_step_end_tensor_inputs: list = None,
         progress_bar=None,
     ):
         batch_size = latents.shape[0]
+        capture = None
+        sigma_last = None
 
         for i, t in enumerate(timesteps):
             is_first_step = i == 0
@@ -524,8 +543,9 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             timestep = t.expand(latents.shape[0])
 
             latent_model_input = latents.to(transformer_dtype)
+            capture_now = capture_last_step and i == len(timesteps) - 1
             with self.transformer.cache_context("cond"):
-                noise_pred = self.transformer(
+                cond_ret = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep,
                     encoder_hidden_states=prompt_embeds,
@@ -537,9 +557,17 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     latents_history_mid=latents_history_mid.to(transformer_dtype),
                     latents_history_long=latents_history_long.to(transformer_dtype),
                     is_first_denoising_step=is_first_step,
+                    memory_tokens=memory_tokens,
+                    capture_last_hidden=capture_now,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
-                )[0]
+                )
+            noise_pred = cond_ret[0]
+            if capture_now:
+                # Write source: last scheduled cond forward (design ch.1 deviation C
+                # — NOT guaranteed t~0; sigma_last conditions the encoder FiLM).
+                capture = cond_ret[2]
+                sigma_last = float(t.item()) / 1000.0
 
             if self.do_classifier_free_guidance and not use_dmd:
                 with self.transformer.cache_context("uncond"):
@@ -555,6 +583,7 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         latents_history_mid=latents_history_mid.to(transformer_dtype),
                         latents_history_long=latents_history_long.to(transformer_dtype),
                         is_first_denoising_step=is_first_step,
+                        memory_tokens=memory_tokens,
                         attention_kwargs=attention_kwargs,
                         return_dict=False,
                     )[0]
@@ -612,6 +641,8 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             if XLA_AVAILABLE:
                 xm.mark_step()
 
+        if capture_last_step:
+            return latents, capture, sigma_last
         return latents
 
     def stage2_sample(
@@ -643,11 +674,16 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         # -------------- DMD --------------
         use_dmd: bool = False,
         is_amplify_first_chunk: bool = False,
+        # ------------ Evolving memory ------------
+        memory_tokens: torch.Tensor = None,
+        capture_last_step: bool = False,
         # ------------ Callback ------------
         callback_on_step_end: Optional[callable] = None,
         callback_on_step_end_tensor_inputs: list = None,
         progress_bar=None,
     ):
+        capture = None
+        sigma_last = None
         num_frames, height, width = (
             latents.shape[-3],
             latents.shape[-2],
@@ -734,11 +770,16 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
             for idx, t in enumerate(timesteps):
                 is_first_step = i_s == 0 and idx == 0
+                # Capture only at the FINAL pyramid stage's last step: lower
+                # stages run at reduced resolution (design ch.1 D10).
+                capture_now = (
+                    capture_last_step and i_s == stage2_num_stages - 1 and idx == len(timesteps) - 1
+                )
 
                 timestep = t.expand(latents.shape[0]).to(torch.int64)
 
                 with self.transformer.cache_context("cond"):
-                    noise_pred = self.transformer(
+                    cond_ret = self.transformer(
                         hidden_states=latents.to(transformer_dtype),
                         timestep=timestep,
                         encoder_hidden_states=prompt_embeds,
@@ -752,7 +793,15 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         latents_history_mid=latents_history_mid.to(transformer_dtype),
                         latents_history_long=latents_history_long.to(transformer_dtype),
                         is_first_denoising_step=is_first_step,
-                    )[0]
+                        memory_tokens=memory_tokens,
+                        capture_last_hidden=capture_now,
+                    )
+                noise_pred = cond_ret[0]
+                if capture_now:
+                    capture = cond_ret[2]
+                    # Actual sigma of this forward (post set_timesteps; for DMD
+                    # this is the stage-local exit sigma, NOT ~0 — design ch.3 偏差1).
+                    sigma_last = float(t.item()) / 1000.0
 
                 if self.do_classifier_free_guidance:
                     with self.transformer.cache_context("cond_uncond"):
@@ -770,6 +819,7 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                             latents_history_mid=latents_history_mid.to(transformer_dtype),
                             latents_history_long=latents_history_long.to(transformer_dtype),
                             is_first_denoising_step=is_first_step,
+                            memory_tokens=memory_tokens,
                         )[0]
 
                     if use_cfg_zero_star:
@@ -924,6 +974,9 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         anti_drift_delta_mu: float = 0.15,
         anti_drift_delta_sigma: float = 0.15,
         anti_drift_corruption_strength: float = 0.1,
+        # ------------ Evolving memory ------------
+        enable_evolving_memory: bool = False,
+        memory_state: Optional[dict] = None,
         # ------------ other ------------
         use_kv_cache: bool = False,
         vae_decode_type: VAEDecodeType = "default",  # "default", "default_batch"
@@ -1196,6 +1249,25 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 history_latents = video_latents
             total_generated_latent_frames += video_latents.shape[2]
 
+        # Evolving-memory state machine (design ch.3 D4/D5/D7): M0 always
+        # readable from section 0; section-level FIFO of write-source captures;
+        # a section's capture is consumed (written into the encoder) when its
+        # frames leave the 19-frame history window, i.e. at the end of section
+        # k for the queue head k-2 (first real write at k=2, writing section 0).
+        mem_enabled = enable_evolving_memory
+        mem_queue = []
+        if mem_enabled:
+            assert getattr(self.transformer, "is_enable_evolving_memory", False), (
+                "enable_evolving_memory=True but the transformer was built without the memory module"
+            )
+            memory_encoder = self.transformer.evolving_memory
+            if memory_state is not None:
+                memory_encoder.query_state = memory_state["M"].to(device)
+                mem_queue = [(idx, cap.to(device), sig) for idx, cap, sig in memory_state.get("queue", [])]
+            else:
+                memory_encoder.reset(batch_size, device=device)
+        self._memory_queue = mem_queue
+
         # 6. Denoising loop
         if use_interpolate_prompt:
             if num_latent_sections < max(interpolate_cumulative_list):
@@ -1358,6 +1430,10 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     else sum(stage2_num_inference_steps_list)
                 )
 
+            mem_tokens = memory_encoder.get_tokens(transformer_dtype) if mem_enabled else None
+            mem_capture = None
+            mem_sigma_last = None
+
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 if is_enable_stage2:
                     latents = self.stage2_sample(
@@ -1388,6 +1464,9 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         # -------------- DMD --------------
                         use_dmd=use_dmd,
                         is_amplify_first_chunk=is_amplify_first_chunk and is_first_section,
+                        # ------------ Evolving memory ------------
+                        memory_tokens=mem_tokens,
+                        capture_last_step=mem_enabled,
                         # ------------ Callback ------------
                         callback_on_step_end=callback_on_step_end,
                         callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
@@ -1420,11 +1499,17 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         dmd_sigmas=dmd_sigmas,
                         dmd_timesteps=dmd_timesteps,
                         is_amplify_first_chunk=is_amplify_first_chunk and is_first_section,
+                        # ------------ Evolving memory ------------
+                        memory_tokens=mem_tokens,
+                        capture_last_step=mem_enabled,
                         # ------------ Callback ------------
                         callback_on_step_end=callback_on_step_end,
                         callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
                         progress_bar=progress_bar,
                     )
+
+                if mem_enabled:
+                    latents, mem_capture, mem_sigma_last = latents
 
                 if use_kv_cache:
                     self.transformer.clear_kv_cache()
@@ -1451,6 +1536,16 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
                 total_generated_latent_frames += latents.shape[2]
                 history_latents = torch.cat([history_latents, latents], dim=2)
+
+                if mem_enabled and mem_capture is not None:
+                    # Each entry keeps its OWN capture-time sigma (the amplified
+                    # first chunk and dynamic shifting change sigma_last per section).
+                    mem_queue.append((k, mem_capture, mem_sigma_last))
+                    if mem_queue[0][0] == k - 2:
+                        _, evicted_hidden, evicted_sigma = mem_queue.pop(0)
+                        with torch.no_grad():
+                            memory_encoder.update(evicted_hidden, sigma_last=evicted_sigma)
+                    self._memory_queue = mem_queue
                 real_history_latents = history_latents[:, :, -total_generated_latent_frames:]
                 index_slice = (
                     slice(None),
