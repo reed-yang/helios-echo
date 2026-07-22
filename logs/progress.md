@@ -22,6 +22,14 @@
 - [x] 研究语料入库（commit 6e1cc7d，16 files / 2703 行）
 - [x] 调研 `../Human-Replacement` 文档管理体系（CLAUDE.md 实时记录规则、docs/superpowers specs+plans 日期命名、logs 双账本、my-docs 本地区、postmortem 规范），适配写入本仓库 CLAUDE.md「Documentation conventions」节；.gitignore 增 `my-docs/`、`results/`
 
+## 2026-07-22（K0 基础落地，plan: docs/plans/2026-07-22-k0-memory-foundations-plan.md）
+
+- [x] `helios/modules/helios_memory.py`：HeliosMemoryEncoder（2 层 cross-attn Enc + 门控 EMA + fp32 state 普通属性 + ctx k/v 投影 + FiLM(σ_last) 零初始化恒等 + frame mask）— commit c4d0328
+- [x] `tests/test_helios_memory.py` 13 项：核心行为 5 + K0 验收（Enc/gate/query_init 梯度非零、detach 截断、BPTT=1 第二窗口可学）+ mask/FiLM + conversion-lite 严格互载 — commit 9afd50e
+- [x] `train_config.py` 演化记忆 13 个 flag（默认全关，存量配置零行为变化）+ `validate_evolving_memory_config()`（D13 断言含 `dmd_num_latent_sections_min>=4`）接入 train_helios.py "For Wan" 校验区；`tests/test_memory_config.py` 6 项 — commit 592f9a3
+- 冒烟门通过：`unittest discover` 19/19 OK（登录节点 CPU，团队环境 /mnt/beegfs/yuheng/miniconda3/envs/helios）
+- 遗留到下一 plan：transformer 注册（设计 ch.1 D9：正式子模块、PEFT exclude、extra_components 第 5 节）、`is_enable_stage1` 断言待对照真实 Stage-C 配置
+
 ## 状态：研究阶段完成
 
 下一步（待决策后启动实现）：
