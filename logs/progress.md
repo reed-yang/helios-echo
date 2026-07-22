@@ -15,6 +15,13 @@
 - [x] 最终汇总：`docs/echo-to-helios-migration-design.md`（总纲 + 四章，119KB）
 - [x] `logs/findings.md` 关键发现汇总
 
+## 2026-07-22（工作仓库建立）
+
+- [x] helios-echo 初始化为 git 仓库：`team` → 本地 `../helios-team`、`origin` → `Visko-Platform/helios-team.git`
+- [x] 继承 `mid_training_xiangbo`（34f5a99），建工作分支 `echo-memory`；本地 `mid_training_xiangbo` 分支追踪 `team/`，用于持续同步
+- [x] 研究语料入库（commit 6e1cc7d，16 files / 2703 行）
+- [x] 调研 `../Human-Replacement` 文档管理体系（CLAUDE.md 实时记录规则、docs/superpowers specs+plans 日期命名、logs 双账本、my-docs 本地区、postmortem 规范），适配写入本仓库 CLAUDE.md「Documentation conventions」节；.gitignore 增 `my-docs/`、`results/`
+
 ## 状态：研究阶段完成
 
 下一步（待决策后启动实现）：

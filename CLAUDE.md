@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## This working copy: helios-echo
+
+`helios-echo/` is a **working fork of `../helios-team` @ `mid_training_xiangbo`** dedicated to porting Echo-Infinity's learnable evolving memory into Helios. Work happens on branch **`echo-memory`**; branch `mid_training_xiangbo` tracks `team/mid_training_xiangbo` (remote `team` = local `../helios-team`, remote `origin` = `github.com/Visko-Platform/helios-team.git`). Sync upstream with `git fetch team && git rebase mid_training_xiangbo` (or merge) after updating the sibling checkout.
+
+Read order for this project:
+1. `docs/echo-to-helios-migration-design.md` — master design (overview + 4 verified chapters). Start at 总纲 §一 (unified baseline) and §二 (prior-vs-code divergence table).
+2. `logs/findings.md` — key findings, engineering landmines, fact corrections.
+3. `logs/progress.md` — current status and next steps (K0 checklist).
+4. `logs/research/read-*.md` — 6 deep-read reports (Echo + Helios internals, all file:line anchored).
+
+The sections below this one document the **inherited helios-team codebase** and remain valid for this tree.
+
 ## What this is
 
 `helios-team/` is a full clone of the **upstream public Helios repo** (`github.com/PKU-YuanGroup/Helios`) — Helios is a Wan2.1-T2V-14B model re-architected into an **autoregressive, chunked video DiT** for real-time long-video generation (claimed 19.5 FPS on a single H100). It is a *sibling* of the `helios/` tree referenced by the parent workspace `../CLAUDE.md`; that parent doc describes a different, locally-modified checkout (single 2600-line trainer, Stage-4 multi-event SFT). **This tree has no Stage-4 / multi-event code** — it is the released Base/Mid/Distilled three-stage pipeline only. Don't assume the parent doc's `file:line` pointers apply here.
@@ -85,3 +97,40 @@ One script for all tasks; the `scripts/inference/helios-{base,mid,distilled}_{t2
 - **`is_train_dmd` doubles GPU memory** (generator + critic transformers, each 14B). `dmd_is_low_vram_mode`/`is_gan_low_vram_mode` swap models GPU↔CPU; the README claims up to four 14B models fit in 80 GB.
 - **Config completeness**: stages share a huge flat `training_config` with many mutually-dependent flags and explicit assertions in `main` (e.g. `use_error_recycling` conflicts with `corrupt_history`/`corrupt_model_input`). Run `compare_yaml.py` and add new keys to *every* stage config, not just one.
 - The `helios/videoalign/` package is a standalone VLM reward trainer (`train_reward.py`) used only when `is_use_reward_model` is set in Stage 3.
+
+## Documentation conventions (helios-echo)
+
+Adapted from `../Human-Replacement`'s documentation system (see its `CLAUDE.md` "实时记录规则"). Directory placement establishes document type; date prefixes establish chronology.
+
+### Real-time recording rule (highest priority)
+
+To survive context compaction and session restarts:
+1. New discoveries / progress / disproven hypotheses → append to `logs/findings.md` / `logs/progress.md` **immediately**, not at session end.
+2. Inference/eval outputs → `results/` (gitignored; generated artifacts, job logs, rendered videos).
+3. Long-session implementation tracking and scratch notes → `my-docs/YYYY-MM-DD-<topic>.md` (gitignored, local only).
+4. Cross-session preferences/lessons → Claude memory system, not repo files.
+
+### Directory layout and naming
+
+| Location | Type | Tracked | Naming |
+|---|---|---|---|
+| `docs/` (flat, UPPERCASE) | inherited helios-team codebase docs | yes | keep upstream `HELIOS_*.md` style; don't rename |
+| `docs/specs/` | design contracts for new work (decision-first: metadata/status → scope → data contract → design → validation gates → edge cases) | yes | `YYYY-MM-DD-<kebab-topic>-design.md` |
+| `docs/plans/` | executable implementation plans (numbered tasks, checkboxes, code blocks, smoke gates, final self-review) — each plan links its spec | yes | `YYYY-MM-DD-<kebab-topic>-plan.md` |
+| `docs/echo-to-helios-migration-design.md` | canonical migration design (predates this convention; grandfathered) | yes | — |
+| `logs/findings.md` | evidence ledger: conclusion/root-cause first, then `file:line` refs, job IDs, commits, measurements, **ruled-out hypotheses** | yes | rolling, dated sections |
+| `logs/progress.md` | execution ledger: checkboxes, commits, jobs, next steps | yes | rolling, dated sections |
+| `logs/research/` | curated agent research reports (deep-reads, verified design sections) | yes | `read-<topic>.md` / `design-<topic>.md` |
+| `agent-research/` | raw conversation exports — provenance only, never edit; consolidate conclusions into dated docs | yes | keep source name (`Claude_export_<title>_<uuid>.md`) |
+| `my-docs/` | local long-session scratch, handoffs, WIP notes | **no** | `YYYY-MM-DD-<topic>.md` |
+| `results/` | generated experiment artifacts | **no** | per-run subdirs |
+
+Deviation from Human-Replacement: they gitignore `logs/`; here `logs/*.md` are **tracked** (this repo is itself the research record) but committed at milestone granularity — append freely, commit in batches.
+
+### Discipline rules
+
+- **Pre-scale validation gate**: any training run or dataset job states its smoke test, sample size, acceptance criteria, and the condition blocking full-scale launch *in the plan doc* before launching. For this project the K0–K4 gates in the design doc chapter 4 are the canonical gates.
+- **Kill events produce postmortems**: a killed stage/experiment gets `docs/specs/YYYY-MM-DD-<topic>-postmortem.md` (versioned status header, superseded-docs list, ruled-out table). New hypotheses must consult the ruled-out table first.
+- **Review provenance**: substantial agent-generated research records model/workflow, verification methodology (e.g. adversarial verify passes), and resolved-vs-deferred issues — see `logs/findings.md` 研究方法记录 for the pattern.
+- **Evidence style**: code claims cite `path/to/file.py:line`; experiment claims cite Slurm job IDs, checkpoint paths, and result dirs. Conclusion first, chronology second.
+- Commit messages in English (Conventional Commits); code comments in English.

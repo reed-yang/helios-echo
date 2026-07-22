@@ -44,3 +44,7 @@ demo_data
 # Local-only: large eval checkpoints + vendored upstream repos (re-clone manually)
 tmp/
 third-party/
+
+# helios-echo local working areas
+my-docs/
+results/
