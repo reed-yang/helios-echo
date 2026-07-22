@@ -483,12 +483,13 @@ class Args:
     logging_dir: str = field(default="logs")
 
 
-def validate_evolving_memory_config(training_config, data_config):
+def validate_evolving_memory_config(training_config, data_config, validation_config=None):
     """Cross-flag assertions for the evolving-memory feature (design ch.2 D13).
 
     Pure function so it is unit-testable without running the trainer; a no-op
     unless the feature is enabled. Called from the train_helios.py config
-    validation block.
+    validation block. validation_config is optional so the pure unit tests can
+    exercise the training/data assertions without constructing it.
     """
     tc, dc = training_config, data_config
     if tc.is_train_memory_module:
@@ -501,6 +502,29 @@ def validate_evolving_memory_config(training_config, data_config):
     assert tc.has_multi_term_memory_patch, (
         "evolving memory conditions on the multi-term patchified history"
     )
+    # The multi-term patchified history only exists on the stage-1 path.
+    # is_enable_stage1 is true across every lineage we fork from: the Stage A/B
+    # ancestor and the DMD Stage-C parent both set it (the latter alongside
+    # is_enable_stage2), so this never conflicts with the DMD regime below.
+    assert tc.is_enable_stage1, (
+        "evolving memory requires is_enable_stage1 (the multi-term history path)"
+    )
+    # Exactly one pre-encoded-latents dataset. The dispatch checks
+    # use_stage3_dataset first (train_helios.py:113-129), so both-true silently
+    # routes to stage3; both-false routes to the raw-mp4 dataset, which lacks the
+    # history-latents format memory reads. Real lineages set exactly one
+    # (Stage A: stage1; DMD Stage C: stage3).
+    assert dc.use_stage1_dataset != dc.use_stage3_dataset, (
+        "evolving memory needs exactly one pre-encoded-latents dataset "
+        "(use_stage1_dataset xor use_stage3_dataset)"
+    )
+    if validation_config is not None:
+        # The memory KV third group and the validation kv-cache path are not
+        # verified compatible; keep them mutually exclusive until they are.
+        assert not validation_config.use_kv_cache, (
+            "validation use_kv_cache is not verified compatible with the memory "
+            "KV group; disable one"
+        )
     if tc.memory_tf_unroll:
         assert dc.use_stage1_dataset and not dc.use_stage3_dataset, (
             "TF unroll consumes the stage-1 history-latents dataset"
