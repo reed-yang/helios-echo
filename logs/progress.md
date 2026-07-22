@@ -70,5 +70,8 @@
 - [x] rollout run2 终局 **8/8 ALL PASS**（+5.5% 开销 / 43.3 GiB 峰值 / 双臂有限）→ verdict `logs/research/rollout-smoke-verdict-run2.md`；管线状态机 GPU 门关闭
 - [x] 恢复期根因修复：run2 日志"消失"= srun stdout 重定向按规范整改前的旧路径（agent-research/）武装，全部哨兵盯新路径（results/）而永久静默；BeeGFS 拒绝 rename 打开中的文件 → 清 6 旧哨兵、重架真路径哨兵（终态自动复制到 results/）。教训：长作业跨越路径规范变更时，用 /proc/<pid>/fd 核实真值通道实际落点，不信"应有路径"
 - [x] P2-interim 漂移 A/B 脚手架计划 + Stage A 实质改造计划（D4-D7）两份计划文档 — commit a02c365
-- [ ] P2 Task 1 时序斜率指标脚本（Sol worker 实现中，曾被网关 503 打断一次已续跑）
-- [ ] Stage A dataloader 证据卡片（Terra worker 抽取中 → logs/research/read-stage-a-dataloader-anchors.md）
+- [x] P2 Task 1 时序斜率指标脚本 — commit 382fe09（对抗验证抓到 motion 分辨率不可比 blocker，已修：Farneback 前缩放到固定 384×640 + 跨分辨率不变性测试；边界指标 L2 默认因环境无 lpips）
+- [x] Stage A dataloader 证据卡片 11/11 → logs/research/read-stage-a-dataloader-anchors.md（stage1 dataset = dataloader_history_latents_dist.py）— commit 7618eb7
+- [x] D13 断言补差 + 加固（commit fe1d7a5 → 7618eb7）：stage1 蕴含 / dataset XOR one-hot / kv-cache 互斥；对抗审查抓到 validation_config 可选默认的静默跳过漏洞，改为必需参数 + TypeError 测试；config 套件 11 项、全套 46 绿
+- [x] ultracode 工作流（wf_de941cfd-8ce，4 agent）：三工作流并行 produce→verify，两个真实缺陷（motion 不可比、可选参数漏洞）在进 GPU 验证前被独立对抗视角抓到（兑现 stewardship 纪律 C）
+- 待做（顺序）：Stage A Task 1-3 主刀实现（D4 驱逐切片 / D6 展开参数 / D7 section 级 loss 原语，证据卡片已备）→ 对抗审查 → 1 节点 smoke profile；P2 Task 0 配方映射 GPU dry-run 可交错
