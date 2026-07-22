@@ -56,3 +56,11 @@
 - [x] 管线状态机（plan: docs/plans/2026-07-22-pipeline-state-machine-plan.md）：stage1/2_sample 捕获契约（末调度步、金字塔仅末 stage、逐条目自带 σ）、__call__ 的 M₀ 初始化/k−2 驱逐写/状态导出 — commit ce62bcc
 - [x] 环境归属定论（用户问询）：yuheng 名下的 env 即 xiangbo 全部作业的运行环境（其 sbatch 与 eval_env.sh 均指向之），无需切换；评测采纳其 eval_env.sh 变量 — 决策记录已修订
 - 冒烟门：CPU 套件 39/39；下一批：GPU 端到端 rollout 冒烟（真权重 + enable_evolving_memory ≥5 sections，验证 k=2 首写/队列/导出）+ P2-interim 漂移 A/B 脚手架 + A1@19500 装配臂
+
+## 2026-07-22 深夜（GPU 冒烟批次 + 文档规范化，pre-compact 快照）
+
+- [x] rollout 冒烟 run1：状态机全过（3 写/队列[3,4]/逐σ）、开销 +5.6%；NaN 根因 = 冒烟调用偏离验证采样配置（Sol worker 取证：产品代码无缺陷、plain 路径未变）— 修正后 run2 运行中（孤儿 srun，log: results/rollout_smoke_run2.log）
+- [x] A1 装配臂冒烟 9/9 PASS（814 LoRA tensors / 6 partial 键 / memory fresh 共存）→ P1 决策记录两臂全绿 — commit 86bd487
+- [x] CLAUDE.md 精简重写（145→57 行）+ context stewardship 四纪律入册；verdict/运行日志归位（logs/research 与 results/）— commit ba9ca82
+- [x] 调度反思与准则：agent-research/2026-07-22-agent-orchestration-retrospective.md、context-stewardship-rules-draft.md
+- 恢复入口：agent-research/2026-07-22-echo-memory-progress-tracking.md 顶部 POST-COMPACT 节

@@ -52,3 +52,8 @@
 ## 研究方法记录
 
 22-agent 工作流（Run ID `wf_e0612e6f-c7e`）：6 并行深读 → 3+1 设计（风险节基于前三节成稿）→ 每节 2 路对抗验证（代码锚定核查 + 可行性反驳）→ 修订。验证轮共发现 26+ 项 issue（含多个 blocker），全部在修订版解决或以脚注反驳。跨越多次进程重启，靠 journal 缓存 + 脚本手术（空返回 fallback/retry）无损续跑。
+
+## GPU 冒烟结论（2026-07-22 深夜批次）
+
+- P1-B 臂（Helios-Base 直载）13/13 PASS；P1-A1 臂（transformer_init + lora368@19500 + partial 装配）9/9 PASS → 生产加载与训练谱系装配两条路径均与 memory 模块兼容，off-path 等价在真权重成立。
+- rollout 冒烟 run1：状态机全对（3 写/队列[3,4]/逐条目σ），开销 +5.6%（验收线 12%），NaN 根因 = 冒烟自身调用偏离验证采样配置（8步+固定mu=1+空负提示），产品代码无缺陷（Sol worker 对照 log_validation/infer 双基准 + diff 复核）。run2（50步+动态shift+标准负提示）运行中。
