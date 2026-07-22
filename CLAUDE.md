@@ -107,7 +107,7 @@ Adapted from `../Human-Replacement`'s documentation system (see its `CLAUDE.md` 
 To survive context compaction and session restarts:
 1. New discoveries / progress / disproven hypotheses → append to `logs/findings.md` / `logs/progress.md` **immediately**, not at session end.
 2. Inference/eval outputs → `results/` (gitignored; generated artifacts, job logs, rendered videos).
-3. Long-session implementation tracking and scratch notes → `my-docs/YYYY-MM-DD-<topic>.md` (gitignored, local only).
+3. Long-session implementation tracking and scratch notes → `agent-research/YYYY-MM-DD-<topic>.md` (gitignored, local only).
 4. Cross-session preferences/lessons → Claude memory system, not repo files.
 
 ### Directory layout and naming
@@ -121,8 +121,7 @@ To survive context compaction and session restarts:
 | `logs/findings.md` | evidence ledger: conclusion/root-cause first, then `file:line` refs, job IDs, commits, measurements, **ruled-out hypotheses** | yes | rolling, dated sections |
 | `logs/progress.md` | execution ledger: checkboxes, commits, jobs, next steps | yes | rolling, dated sections |
 | `logs/research/` | curated agent research reports (deep-reads, verified design sections) | yes | `read-<topic>.md` / `design-<topic>.md` |
-| `agent-research/` | raw conversation exports — provenance only, never edit; consolidate conclusions into dated docs | yes | keep source name (`Claude_export_<title>_<uuid>.md`) |
-| `my-docs/` | local long-session scratch, handoffs, WIP notes | **no** | `YYYY-MM-DD-<topic>.md` |
+| `agent-research/` | the `my-docs/` role of Human-Replacement: long-session scratch, handoffs, WIP notes, and raw conversation exports (provenance only, never edit; consolidate conclusions into dated docs under `docs/`) | **no** (new files local by default; deliberately committed exports stay tracked) | scratch: `YYYY-MM-DD-<topic>.md`; exports: keep source name (`Claude_export_<title>_<uuid>.md`) |
 | `results/` | generated experiment artifacts | **no** | per-run subdirs |
 
 Deviation from Human-Replacement: they gitignore `logs/`; here `logs/*.md` are **tracked** (this repo is itself the research record) but committed at milestone granularity — append freely, commit in batches.

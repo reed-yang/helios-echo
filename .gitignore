@@ -45,6 +45,6 @@ demo_data
 tmp/
 third-party/
 
-# helios-echo local working areas
-my-docs/
+# helios-echo local working areas (new files; deliberately committed files stay tracked)
+agent-research/
 results/
