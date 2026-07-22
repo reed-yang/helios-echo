@@ -483,13 +483,15 @@ class Args:
     logging_dir: str = field(default="logs")
 
 
-def validate_evolving_memory_config(training_config, data_config, validation_config=None):
+def validate_evolving_memory_config(training_config, data_config, validation_config):
     """Cross-flag assertions for the evolving-memory feature (design ch.2 D13).
 
     Pure function so it is unit-testable without running the trainer; a no-op
     unless the feature is enabled. Called from the train_helios.py config
-    validation block. validation_config is optional so the pure unit tests can
-    exercise the training/data assertions without constructing it.
+    validation block. validation_config is required (not optional) so the
+    kv-cache mutual-exclusion is a function invariant, not a calling convention:
+    a caller cannot silently skip that D13 guard by omitting the argument
+    (ValidationConfig() is a trivial default-constructed dataclass).
     """
     tc, dc = training_config, data_config
     if tc.is_train_memory_module:
@@ -518,13 +520,13 @@ def validate_evolving_memory_config(training_config, data_config, validation_con
         "evolving memory needs exactly one pre-encoded-latents dataset "
         "(use_stage1_dataset xor use_stage3_dataset)"
     )
-    if validation_config is not None:
-        # The memory KV third group and the validation kv-cache path are not
-        # verified compatible; keep them mutually exclusive until they are.
-        assert not validation_config.use_kv_cache, (
-            "validation use_kv_cache is not verified compatible with the memory "
-            "KV group; disable one"
-        )
+    # The token-inserted memory prefix requires unrestricted self-attention,
+    # while the validation kv-cache path is only consumed by the restrict-self-attn
+    # branch; keep them mutually exclusive until verified compatible.
+    assert not validation_config.use_kv_cache, (
+        "validation use_kv_cache is not verified compatible with evolving memory "
+        "(memory needs unrestricted attention); disable one"
+    )
     if tc.memory_tf_unroll:
         assert dc.use_stage1_dataset and not dc.use_stage3_dataset, (
             "TF unroll consumes the stage-1 history-latents dataset"
