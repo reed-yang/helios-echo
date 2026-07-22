@@ -44,6 +44,7 @@ from helios.utils.utils_base import (
     encode_prompt,
     get_optimizer,
     load_extra_components,
+    build_transformer_param_groups,
     load_model_checkpoint,
     save_extra_components,
     save_model_checkpoint,
@@ -391,6 +392,10 @@ def main(args):
                     if patch_name not in target_modules:
                         target_modules.append(patch_name)
         target_modules = [t for t in target_modules if "norm" not in t]
+    # Evolving memory trains full-rank outside PEFT: keep its Linears out of the
+    # adapter (the all-linear scan above collects them otherwise).
+    if args.training_config.is_enable_evolving_memory:
+        target_modules = [t for t in target_modules if "evolving_memory" not in t]
     else:
         target_modules = args.model_config.lora_target_modules
 
@@ -455,6 +460,10 @@ def main(args):
     else:
         transformer.add_adapter(transformer_lora_config)
 
+    if args.training_config.is_enable_evolving_memory:
+        _mem_lora = [n for n, _ in transformer.named_parameters() if "evolving_memory" in n and "lora_" in n]
+        assert not _mem_lora, f"PEFT wrapped evolving_memory Linears (must train full-rank): {_mem_lora[:3]}"
+
     if args.model_config.train_norm_layers:
         for name, param in transformer.named_parameters():
             if any(k in name for k in NORM_LAYER_PREFIXES):
@@ -470,11 +479,27 @@ def main(args):
         trainable_modules.extend(["q_loras", "k_loras", "v_loras"])
     if args.training_config.is_amplify_history:
         trainable_modules.append("history_key_scale")
+    if args.training_config.is_train_memory_module:
+        trainable_modules.append("evolving_memory")
+        if args.training_config.is_amplify_memory:
+            trainable_modules.append("memory_key_scale")
     for name, param in transformer.named_parameters():
         for trainable_module_name in trainable_modules:
             if trainable_module_name in name:
                 param.requires_grad = True
                 break
+
+    if args.training_config.memory_freeze_backbone:
+        # Stage A: only the memory stack trains. add_adapter marked LoRA params
+        # trainable and the substring loop above only ENABLES — freeze the rest
+        # here (design ch.2 D10).
+        assert args.training_config.is_train_memory_module, (
+            "memory_freeze_backbone without is_train_memory_module would freeze everything"
+        )
+        for name, param in transformer.named_parameters():
+            if "evolving_memory" in name or "memory_key_scale" in name:
+                continue
+            param.requires_grad = False
 
     if (
         getattr(args.model_config, "is_full_finetune", False)
@@ -812,10 +837,13 @@ def main(args):
         # only upcast trainable parameters (LoRA) into fp32
         cast_training_params(models, dtype=torch.float32)
 
-    # Optimization parameters
-    transformer_lora_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
-    transformer_parameters_with_lr = {"params": transformer_lora_parameters, "lr": args.training_config.learning_rate}
-    params_to_optimize = [transformer_parameters_with_lr]
+    # Optimization parameters (memory params get their own role-tagged lr group,
+    # design ch.2 D11; identical single-group behavior when memory is off)
+    params_to_optimize = build_transformer_param_groups(
+        transformer,
+        base_lr=args.training_config.learning_rate,
+        memory_lr=args.training_config.memory_learning_rate,
+    )
 
     use_deepspeed_optimizer = (
         accelerator.state.deepspeed_plugin is not None
@@ -825,6 +853,11 @@ def main(args):
         accelerator.state.deepspeed_plugin is not None
         and "scheduler" in accelerator.state.deepspeed_plugin.deepspeed_config
     )
+    if any(g.get("role") == "memory" for g in params_to_optimize):
+        assert not use_deepspeed_optimizer and not use_deepspeed_scheduler, (
+            "the memory param group lr would be flattened by the DeepSpeed dummy optimizer/scheduler "
+            "(design ch.2 D11/F4); use a DS json without optimizer/scheduler blocks"
+        )
 
     optimizer = get_optimizer(args, accelerator, params_to_optimize, use_deepspeed=use_deepspeed_optimizer)
 
@@ -1088,15 +1121,26 @@ def main(args):
             # (the next scheduler.step() rewrites param_groups from the restored base_lrs). Re-apply
             # the config LR to both so continue-runs can lower LR without a fresh optimizer.
             if os.environ.get("HELIOS_FORCE_LR", "0") == "1":
-                forced_lr = args.training_config.learning_rate
+                # Role-aware: memory groups keep their own configured lr instead
+                # of being flattened to the base lr (design ch.2 D11(b)).
+                role_lrs = {
+                    "base": args.training_config.learning_rate,
+                    "memory": args.training_config.memory_learning_rate,
+                }
+                forced_lrs = []
                 for group in optimizer.param_groups:
+                    forced_lr = role_lrs.get(group.get("role", "base"), args.training_config.learning_rate)
                     group["lr"] = forced_lr
                     if "initial_lr" in group:
                         group["initial_lr"] = forced_lr
+                    forced_lrs.append(forced_lr)
                 base_sched = getattr(lr_scheduler, "scheduler", lr_scheduler)
                 if hasattr(base_sched, "base_lrs"):
-                    base_sched.base_lrs = [forced_lr] * len(base_sched.base_lrs)
-                accelerator.print(f"[HELIOS_FORCE_LR] optimizer/scheduler lr forced to {forced_lr}")
+                    if len(base_sched.base_lrs) == len(forced_lrs):
+                        base_sched.base_lrs = forced_lrs
+                    else:
+                        base_sched.base_lrs = [role_lrs["base"]] * len(base_sched.base_lrs)
+                accelerator.print(f"[HELIOS_FORCE_LR] optimizer/scheduler lr forced to {forced_lrs}")
 
             global_step = int(os.path.basename(path).split("-")[1])
 

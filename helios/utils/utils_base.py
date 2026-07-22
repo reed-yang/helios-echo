@@ -253,6 +253,25 @@ def save_extra_components(args, model=None, model_state_dict=None, output_dir=No
                 for k, v in model.gan_final_head.state_dict().items():
                     state_dict[f"gan_final_head.{k}"] = v.detach().clone().cpu()
 
+    # 5. Save evolving-memory components (full-rank, outside the PEFT adapter).
+    # Gated on ENABLE (not train) so Stage-C frozen variants persist too
+    # (design ch.2 D12). The rolling query_state is a plain attribute and never
+    # appears in any state_dict by construction.
+    if getattr(args.training_config, "is_enable_evolving_memory", False):
+        if use_state_dict:
+            for k, v in model_state_dict.items():
+                if k.startswith("evolving_memory.") or "memory_key_scale" in k:
+                    state_dict[k] = v.detach().clone().cpu() if torch.is_tensor(v) else v
+        else:
+            if hasattr(model, "evolving_memory"):
+                for k, v in model.evolving_memory.state_dict().items():
+                    state_dict[f"evolving_memory.{k}"] = v.detach().clone().cpu()
+            for block_idx, block in enumerate(model.blocks):
+                if hasattr(block.attn1, "memory_key_scale"):
+                    state_dict[f"blocks.{block_idx}.attn1.memory_key_scale"] = (
+                        block.attn1.memory_key_scale.detach().clone().cpu()
+                    )
+
     torch.save(state_dict, os.path.join(output_dir, "transformer_partial.pth"))
     print(f"Saved checkpoint with {len(state_dict)} parameters to {output_dir}/transformer_partial.pth")
 
@@ -361,6 +380,36 @@ def load_extra_components(args, model, checkpoint_path):
                 history_keys_count += 1
 
         print(f"Loaded {history_keys_count} parameters for History Scale")
+
+    # Load evolving-memory components (design ch.2 D12: fail loudly when the
+    # checkpoint carries memory keys but the model was built without the module
+    # — silent skipping would look like a successful lineage handoff).
+    memory_keys = [k for k in state_dict.keys() if k.startswith("evolving_memory.")]
+    if memory_keys:
+        assert hasattr(model, "evolving_memory"), (
+            "checkpoint contains evolving_memory.* keys but the model was constructed "
+            "without is_enable_evolving_memory"
+        )
+        memory_state = {
+            k.replace("evolving_memory.", "", 1): v for k, v in state_dict.items() if k.startswith("evolving_memory.")
+        }
+        model.evolving_memory.load_state_dict(memory_state, strict=True)
+        loaded_keys.update(memory_keys)
+        print(f"Loaded {len(memory_keys)} parameters for evolving_memory")
+    memory_scale_count = 0
+    for block_idx, block in enumerate(model.blocks):
+        memory_scale_key = f"blocks.{block_idx}.attn1.memory_key_scale"
+        if memory_scale_key in state_dict:
+            assert hasattr(block.attn1, "memory_key_scale"), (
+                f"checkpoint contains {memory_scale_key} but the block was constructed without is_amplify_memory"
+            )
+            block.attn1.memory_key_scale.data = state_dict[memory_scale_key].to(
+                block.attn1.memory_key_scale.device
+            )
+            loaded_keys.add(memory_scale_key)
+            memory_scale_count += 1
+    if memory_scale_count:
+        print(f"Loaded {memory_scale_count} parameters for Memory Scale")
 
     # Load GAN
     gan_keys_count = 0
@@ -764,3 +813,26 @@ class AdaptiveAntiDrifting:
         self.global_mean = None
         self.global_var = None
         self.is_initialized = False
+
+
+def build_transformer_param_groups(transformer, base_lr, memory_lr):
+    """Split trainable transformer params into base vs evolving-memory groups
+    (design ch.2 D11). Memory params (full-rank encoder + per-block
+    memory_key_scale) get their own lr; each group carries a 'role' tag that
+    the HELIOS_FORCE_LR resume path uses to restore per-group lrs instead of
+    flattening them."""
+    base_params, memory_params = [], []
+    for name, param in transformer.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "evolving_memory" in name or "memory_key_scale" in name:
+            memory_params.append(param)
+        else:
+            base_params.append(param)
+    groups = []
+    if base_params:
+        groups.append({"params": base_params, "lr": base_lr, "role": "base"})
+    if memory_params:
+        groups.append({"params": memory_params, "lr": memory_lr, "role": "memory"})
+    assert groups, "no trainable parameters found for the optimizer"
+    return groups
