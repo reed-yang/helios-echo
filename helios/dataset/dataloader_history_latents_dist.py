@@ -17,6 +17,7 @@ class BucketedFeatureDataset(Dataset):
         force_rebuild=False,
         return_all_vae_latent=False,
         return_prompt_raw=False,
+        return_evicted_latent=False,
         num_rollout_sections=3,
         single_res=False,
         single_height=384,
@@ -28,6 +29,7 @@ class BucketedFeatureDataset(Dataset):
         self.force_rebuild = force_rebuild
         self.return_all_vae_latent = return_all_vae_latent
         self.return_prompt_raw = return_prompt_raw
+        self.return_evicted_latent = return_evicted_latent
         self.num_rollout_sections = num_rollout_sections
         self.single_res = single_res
         self.single_height = single_height
@@ -133,6 +135,53 @@ class BucketedFeatureDataset(Dataset):
     def set_epoch(self, epoch):
         self._epoch = epoch
 
+    @staticmethod
+    def _compute_eviction(continue_source_latent, choice_idx, latent_window_size, history_window_size):
+        """Eviction slices for the memory write path (design ch.2 D4).
+
+        Advancing the target section from k-1 to k rolls the oldest
+        latent_window_size frames out of section (k-1)'s history window:
+        continue_source_latent[:, W*(k-1) : W*k) with W=latent_window_size.
+        Because the timeline is [history_window_size zeros] + real frames,
+        the number of REAL frames among the evicted ones is
+        min(W, max(0, W*k - history_window_size)) — the single source of
+        truth for whether/how much to write (never hardcode k boundaries).
+
+        Returns (evicted_latent [C,W,H,W'], evicted_history [C,Hw,H,W'],
+        evicted_valid_frames int). evicted_history is the Hw-frame slice
+        preceding the evicted block, left-padded with zeros on underflow.
+        choice_idx == 0 has no predecessor section: all-zero tensors, 0 valid.
+        """
+        channels, _, height, width = continue_source_latent.shape
+        evicted_start = (choice_idx - 1) * latent_window_size
+        evicted_valid_frames = int(
+            min(latent_window_size, max(0, choice_idx * latent_window_size - history_window_size))
+        )
+
+        if choice_idx <= 0:
+            evicted_latent = continue_source_latent.new_zeros(
+                channels, latent_window_size, height, width
+            )
+            evicted_history = continue_source_latent.new_zeros(
+                channels, history_window_size, height, width
+            )
+            return evicted_latent, evicted_history, evicted_valid_frames
+
+        evicted_latent = continue_source_latent[
+            :, evicted_start : evicted_start + latent_window_size
+        ].clone()
+
+        hist_start = evicted_start - history_window_size
+        pad = max(0, -hist_start)
+        real_history = continue_source_latent[:, max(0, hist_start) : evicted_start]
+        if pad > 0:
+            zero_pad = continue_source_latent.new_zeros(channels, pad, height, width)
+            evicted_history = torch.cat([zero_pad, real_history], dim=1)
+        else:
+            evicted_history = real_history.clone()
+
+        return evicted_latent, evicted_history, evicted_valid_frames
+
     def prepare_stage1_latent(self, vae_latent, idx, base_vae_latent=None):
         source_latent = base_vae_latent if base_vae_latent is not None else vae_latent
 
@@ -191,9 +240,18 @@ class BucketedFeatureDataset(Dataset):
         history_latent = continue_source_latent[:, start_indice : start_indice + history_window_size, :, :]
         target_latent = continue_vae_latent[:, start_indice + history_window_size : end_indice, :, :]
 
+        eviction = None
+        if self.return_evicted_latent:
+            eviction = self._compute_eviction(
+                continue_source_latent,
+                choice_idx,
+                latent_window_size=latent_window_size,
+                history_window_size=history_window_size,
+            )
+
         # choice_idx is the index of the target chunk (0-based over total_sections). It is
         # returned so the multi-event path can look up which event owns this chunk.
-        return x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx
+        return x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx, eviction
 
     def __len__(self):
         return len(self.samples)
@@ -345,7 +403,7 @@ class BucketedFeatureDataset(Dataset):
                 feature_data = torch.load(sample_info["file_path"], map_location="cpu", weights_only=False)
                 feature_data = self._apply_tag_embed_override(feature_data, sample_info["file_path"])
                 feature_data = self._apply_text_sidecar(feature_data, sample_info["file_path"])
-                x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx = (
+                x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx, eviction = (
                     self.prepare_stage1_latent(feature_data["vae_latent"], idx, base_vae_latent)
                 )
                 if self.return_prompt_raw:
@@ -380,6 +438,12 @@ class BucketedFeatureDataset(Dataset):
 
         if self.return_prompt_raw:
             output_dict["prompt_raws"] = prompt_raws
+
+        if self.return_evicted_latent:
+            evicted_latent, evicted_history, evicted_valid_frames = eviction
+            output_dict["evicted_latents"] = evicted_latent
+            output_dict["evicted_history_latents"] = evicted_history
+            output_dict["evicted_valid_frames"] = evicted_valid_frames
 
         return output_dict
 
