@@ -64,3 +64,11 @@
 - [x] CLAUDE.md 精简重写（145→57 行）+ context stewardship 四纪律入册；verdict/运行日志归位（logs/research 与 results/）— commit ba9ca82
 - [x] 调度反思与准则：agent-research/2026-07-22-agent-orchestration-retrospective.md、context-stewardship-rules-draft.md
 - 恢复入口：agent-research/2026-07-22-echo-memory-progress-tracking.md 顶部 POST-COMPACT 节
+
+## 2026-07-22 深夜（post-compact 恢复批次）
+
+- [x] rollout run2 终局 **8/8 ALL PASS**（+5.5% 开销 / 43.3 GiB 峰值 / 双臂有限）→ verdict `logs/research/rollout-smoke-verdict-run2.md`；管线状态机 GPU 门关闭
+- [x] 恢复期根因修复：run2 日志"消失"= srun stdout 重定向按规范整改前的旧路径（agent-research/）武装，全部哨兵盯新路径（results/）而永久静默；BeeGFS 拒绝 rename 打开中的文件 → 清 6 旧哨兵、重架真路径哨兵（终态自动复制到 results/）。教训：长作业跨越路径规范变更时，用 /proc/<pid>/fd 核实真值通道实际落点，不信"应有路径"
+- [x] P2-interim 漂移 A/B 脚手架计划 + Stage A 实质改造计划（D4-D7）两份计划文档 — commit a02c365
+- [ ] P2 Task 1 时序斜率指标脚本（Sol worker 实现中，曾被网关 503 打断一次已续跑）
+- [ ] Stage A dataloader 证据卡片（Terra worker 抽取中 → logs/research/read-stage-a-dataloader-anchors.md）
