@@ -29,7 +29,14 @@
 
 6. **预算与协调**：Tier-0 ≈ 5.3–5.9k H200·h；c-node07 被 rwtag pin 死仅可条件复用；基座冻结 `_correct/checkpoint-19500`；K3 采用配对相对口径（历史 0.069 属另一 campaign 谱系，绝对阈值会误杀）。
 
-## 事实修正记录
+## 事实修正记录（实现期新增）
+
+- **设计 D11 被代码证伪**：utils_helios_post.py 有 4 处对 transformer 返回值的二元组解包（:329/:3212/:3295/:3350，DMD/GAN 路径），"恒定三元组、所有调用点索引 [0]" 不成立 → 实现改为条件返回（仅 `capture_last_hidden=True` 时三元组），存量调用点零改动。
+- **测试陷阱**：`init_weights()` 将 `proj_out` 权重与 bias 全部清零（transformer_helios.py:1599 + 基础循环）→ 新构造模型输出恒零，任何基于输出的断言（等价性/梯度）都会空洞通过或假失败。tiny 模型测试必须重随机化 proj_out。
+- **GPU 测试要点**：flash-attn3 只接受 CUDA + fp16/bf16 张量；测试在 CUDA 可用时自动上卡转 bf16（顺带覆盖了 bf16 计算 + fp32 state 不变量的组合）。
+- **决策记录**：真模型测试的环境与 ckpt 选型见 `docs/specs/2026-07-22-real-model-test-checkpoint-decision.md`（P1 冒烟 → Helios-Base + A1@19500 装配臂；P2 anti-drift → Distilled 为主）。
+
+## 事实修正记录（研究期）
 
 - 早期勘察误读：`infer_helios.py:290` 的 `is_amplify_history=True` 只是 loader shim（transformer 已构造完毕），**不激活**运行时放大；冻结基线实际 `is_amplify_history: false`。
 - Echo "+10.6% 吞吐开销"在 Echo 仓库无基准佐证（源自论文转述），已撤销"代码事实"地位，验收以实测 ≤12% 为线。

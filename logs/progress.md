@@ -37,3 +37,13 @@
 2. 评测工具先行：4 类时序斜率指标 external_command 脚本 + D10 注意力诊断路径（Stage A 期间交付）
 3. 工具链先行合并：save/load_extra_components 第 5 节、merge/EMA memory 分支（默认关闭门控，不阻塞主线）
 4. 与主线协调：C2 基座冻结 checkpoint-19500 + no-KV 基线重跑；C5 书面冻结（不切 Wan2.2、VQ 不先行）
+
+## 2026-07-22（transformer 读路径集成，plan: docs/plans/2026-07-22-transformer-memory-integration-plan.md）
+
+- [x] `transformer_helios.py` 手术：evolving_memory 子模块注册（config kwargs 6 项）、token 插入读路径（分数 RoPE + t=0 AdaLN 复用 + guidance 分支 prefix 切分）、三分记账透传、独立 memory_key_scale（init −4→scale≈1.16）、capture_last_hidden 条件三元组返回 — commit 555f7ba
+- [x] 设计 D11 修正：4 处二元组解包调用点（utils_helios_post.py）→ 条件返回替代恒定三元组
+- [x] 集成测试 8 项：注册/旧 ckpt 加载/关闭路径逐位等价/读路径生效/捕获 API/端到端梯度（含 memory_key_scale）
+- [x] 冒烟门双通过：CPU（SDPA, fp32）27/27；H200 c-node03 单卡（flash-attn3, bf16）27/27
+- [x] 调试记录：proj_out 零初始化致输出恒零的测试盲区（见 findings）
+- [x] 决策记录 `docs/specs/2026-07-22-real-model-test-checkpoint-decision.md`：环境 = xiangbo env（yuheng/envs/helios）；P1 冒烟 = Helios-Base + A1@19500 装配臂；P2 anti-drift = Distilled 为主（候选 A1/A2/A3/B/C 全列，含 revisit 条件）
+- 下一步：trainer 接线（PEFT exclude / trainable_modules / extra_components 第 5 节 / param groups）→ P1 真权重冒烟 → pipeline 状态机
