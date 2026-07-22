@@ -42,6 +42,7 @@ from diffusers.utils import apply_lora_scale, deprecate, logging
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 
 from .helios_kernels import attn_varlen_func, create_navit_attention_masks
+from .helios_memory import HeliosMemoryEncoder
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -204,13 +205,21 @@ class HeliosAttnProcessor:
         original_context_length_list: list = None,
         enable_navit: bool = False,
         is_first_denoising_step: bool = False,
+        memory_context_length: int = 0,
     ) -> torch.Tensor:
         use_cache = False
         history_seq_len = None
         enable_cross = attn.is_cross_attention
 
+        if memory_context_length > 0:
+            assert not attn.restrict_self_attn and not enable_navit, (
+                "evolving memory v1 supports only the unrestricted non-NAViT attention path"
+            )
+
         if not enable_cross:
-            history_seq_len = (hidden_states.shape[1] - original_context_length) // len(original_context_length_list)
+            history_seq_len = (
+                hidden_states.shape[1] - original_context_length - memory_context_length
+            ) // len(original_context_length_list)
 
         if attn.restrict_self_attn:
             use_cache = self.cache_enabled and not is_first_denoising_step and self.kv_cache is not None
@@ -405,7 +414,19 @@ class HeliosAttnProcessor:
                     seq_start += history_seq_len + cur_seq_len
                 key = key_new
             else:
-                key = torch.cat([key[:, :history_seq_len] * scale_key, key[:, history_seq_len:]], dim=1)
+                mem_len = memory_context_length
+                key = torch.cat(
+                    [
+                        key[:, :mem_len],
+                        key[:, mem_len : mem_len + history_seq_len] * scale_key,
+                        key[:, mem_len + history_seq_len :],
+                    ],
+                    dim=1,
+                )
+
+        if not enable_cross and memory_context_length > 0 and getattr(attn, "is_amplify_memory", False):
+            scale_mem = attn.get_scale_memory().view(1, 1, -1, 1)
+            key = torch.cat([key[:, :memory_context_length] * scale_mem, key[:, memory_context_length:]], dim=1)
 
         hidden_states = attn_varlen_func(
             query,
@@ -476,6 +497,7 @@ class HeliosAttention(torch.nn.Module, AttentionModuleMixin):
         restrict_lora_rank=128,
         is_amplify_history=False,
         history_scale_mode="per_head",  # [scalar, per_head]
+        is_amplify_memory=False,
     ):
         super().__init__()
 
@@ -526,6 +548,17 @@ class HeliosAttention(torch.nn.Module, AttentionModuleMixin):
             self.history_scale_mode = history_scale_mode
             self.max_scale = 10.0
             self.register_buffer("_scale_cache", None)
+
+        self.is_amplify_memory = is_amplify_memory
+        if is_amplify_memory:
+            # Memory K amplification starts near-neutral (raw -4 -> scale ~1.16),
+            # unlike history amp whose raw=1 init presses already-trained history.
+            self.memory_key_scale = nn.Parameter(torch.full((heads,), -4.0))
+            if not hasattr(self, "max_scale"):
+                self.max_scale = 10.0
+
+    def get_scale_memory(self):
+        return 1.0 + torch.sigmoid(self.memory_key_scale) * (self.max_scale - 1.0)
 
     def get_scale_key(self):
         if self.history_key_scale.requires_grad:
@@ -732,6 +765,7 @@ class HeliosTransformerBlock(nn.Module):
         restrict_lora_rank: int = 128,
         is_amplify_history: bool = False,
         history_scale_mode: str = "per_head",  # [scalar, per_head],
+        is_amplify_memory: bool = False,
     ):
         super().__init__()
 
@@ -750,6 +784,7 @@ class HeliosTransformerBlock(nn.Module):
             restrict_lora_rank=restrict_lora_rank,
             is_amplify_history=is_amplify_history,
             history_scale_mode=history_scale_mode,
+            is_amplify_memory=is_amplify_memory,
         )
 
         # 2. Cross-attention
@@ -784,6 +819,7 @@ class HeliosTransformerBlock(nn.Module):
         original_context_length: int = None,
         original_context_length_list: list = None,
         is_first_denoising_step: bool = False,
+        memory_context_length: int = 0,
     ) -> torch.Tensor:
         enable_navit = False
         if len(original_context_length_list) > 1:
@@ -816,12 +852,15 @@ class HeliosTransformerBlock(nn.Module):
             original_context_length_list,
             enable_navit,
             is_first_denoising_step=is_first_denoising_step,
+            memory_context_length=memory_context_length,
         )
         hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
 
         # 2. Cross-attention
         if self.guidance_cross_attn:
-            history_seq_len = (hidden_states.shape[1] - original_context_length) // len(original_context_length_list)
+            history_seq_len = (
+                hidden_states.shape[1] - original_context_length - memory_context_length
+            ) // len(original_context_length_list)
 
             if enable_navit:
                 num_seqs = len(original_context_length_list)
@@ -863,9 +902,12 @@ class HeliosTransformerBlock(nn.Module):
 
                 hidden_states = torch.cat(hidden_states_list, dim=1)
             else:
+                # The prefix kept out of text cross-attention covers memory AND
+                # latent history (memory is content-state, not instruction-state).
+                prefix_len = memory_context_length + history_seq_len
                 history_hidden_states, hidden_states = (
-                    hidden_states[:, :history_seq_len],
-                    hidden_states[:, history_seq_len:],
+                    hidden_states[:, :prefix_len],
+                    hidden_states[:, prefix_len:],
                 )
                 norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
                 attn_output = self.attn2(
@@ -958,6 +1000,7 @@ class HeliosTransformer3DModel(
         "norm2",
         "norm3",
         "history_key_scale",
+        "memory_key_scale",
     ]
     _keys_to_ignore_on_load_unexpected = ["norm_added_q"]
     _repeated_blocks = ["HeliosTransformerBlock"]
@@ -1012,6 +1055,12 @@ class HeliosTransformer3DModel(
         is_use_gan_final: bool = False,
         gan_cond_map_dim: int = 768,
         gan_hooks: List[int] = [5, 15, 25, 35],
+        is_enable_evolving_memory: bool = False,
+        memory_num_query_frames: int = 3,
+        memory_frame_hw: tuple[int, ...] = (12, 20),
+        memory_enc_num_layers: int = 2,
+        memory_gate_init_bias: float = 0.75,
+        is_amplify_memory: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1048,6 +1097,7 @@ class HeliosTransformer3DModel(
                     restrict_lora_rank=restrict_lora_rank,
                     is_amplify_history=is_amplify_history,
                     history_scale_mode=history_scale_mode,
+                    is_amplify_memory=is_amplify_memory,
                 )
                 for _ in range(num_layers)
             ]
@@ -1067,6 +1117,21 @@ class HeliosTransformer3DModel(
             self.patch_mid = nn.Conv3d(in_channels, self.inner_dim, kernel_size=(2, 4, 4), stride=(2, 4, 4))
             self.patch_long = nn.Conv3d(in_channels, self.inner_dim, kernel_size=(4, 8, 8), stride=(4, 8, 8))
             self.initialize_weight_from_another_conv3d(self.patch_embedding)
+
+        # 5b. Evolving memory (Echo-Infinity port). Constructed AFTER init_weights
+        # so the encoder's custom initializations (zero-init gate weight, FiLM
+        # zero head) survive. Design: docs/echo-to-helios-migration-design.md ch.1.
+        self.is_enable_evolving_memory = is_enable_evolving_memory
+        if is_enable_evolving_memory:
+            self.evolving_memory = HeliosMemoryEncoder(
+                dim=inner_dim,
+                num_heads=num_attention_heads,
+                head_dim=attention_head_dim,
+                n_layers=memory_enc_num_layers,
+                n_mem_frames=memory_num_query_frames,
+                mem_frame_hw=tuple(memory_frame_hw),
+                gate_init_bias=memory_gate_init_bias,
+            )
 
         # 6. Initial Gan
         self.is_use_gan = is_use_gan
@@ -1107,6 +1172,18 @@ class HeliosTransformer3DModel(
         sd = {k: v.clone() for k, v in sd.items()}
 
         self.load_state_dict(sd, strict=False)
+
+    def _build_memory_rope(self, batch_size, device):
+        """RoPE for memory tokens: fractional frame ids in (0, 1) — after the
+        x0 anchor (id 0), before long-term (ids 1..16) — on the fixed
+        memory_frame_hw grid with mid-tier-style spatially pooled frequencies
+        (design ch.1 §4; the slot choice is ablation A9)."""
+        n = self.config.memory_num_query_frames
+        mem_h, mem_w = self.config.memory_frame_hw
+        ids = torch.arange(1, n + 1, dtype=torch.float32) / (n + 1)
+        freqs = self.rope(frame_indices=ids.unsqueeze(0), height=2 * mem_h, width=2 * mem_w, device=device)
+        freqs = center_down_sample_3d(freqs, (1, 2, 2))
+        return freqs.flatten(2).transpose(1, 2).expand(batch_size, -1, -1)
 
     def gradient_checkpointing_method(self, block, *args):
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -1282,6 +1359,9 @@ class HeliosTransformer3DModel(
         latents_history_mid=None,
         latents_history_long=None,
         is_first_denoising_step: bool = False,
+        # ------------ Evolving memory ------------
+        memory_tokens: Optional[torch.Tensor] = None,
+        capture_last_hidden: bool = False,
         # ------------ GAN ------------
         gan_mode: bool = False,
         return_dict: bool = True,
@@ -1304,6 +1384,18 @@ class HeliosTransformer3DModel(
             )
             == 1
         ), "All history latents and indices must either all exist or all be None"
+
+        if memory_tokens is not None:
+            assert indices_hidden_states is not None, (
+                "evolving memory requires the history-conditioned (stage-1 continuation) input format"
+            )
+            assert self.config.zero_history_timestep, (
+                "evolving memory v1 requires zero_history_timestep=True so the shared t=0 AdaLN path covers memory"
+            )
+            assert not isinstance(hidden_states, list), "evolving memory v1 does not support NAViT packing"
+        if capture_last_hidden:
+            assert not return_dict, "capture_last_hidden requires return_dict=False (tuple return)"
+            assert not isinstance(hidden_states, list), "capture_last_hidden v1 does not support NAViT packing"
 
         if indices_hidden_states is not None and indices_hidden_states.ndim == 1:
             indices_hidden_states = indices_hidden_states.unsqueeze(0)
@@ -1348,6 +1440,21 @@ class HeliosTransformer3DModel(
         post_patch_height = sum(post_patch_height_list)
         post_patch_width = sum(post_patch_width_list)
         original_context_length = sum(original_context_length_list)
+
+        # Evolving memory: outermost prefix [mem | long | mid | short | current].
+        # Prepended BEFORE history_context_length is computed so the existing
+        # t=0 AdaLN span (built from history_context_length) covers memory too.
+        memory_context_length = 0
+        if memory_tokens is not None:
+            memory_rope = self._build_memory_rope(batch_size, hidden_states.device).to(rotary_emb.dtype)
+            memory_tokens = memory_tokens.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            assert memory_tokens.shape[1] == memory_rope.shape[1], (
+                "memory_tokens length must equal memory_num_query_frames * prod(memory_frame_hw)"
+            )
+            hidden_states = torch.cat([memory_tokens, hidden_states], dim=1)
+            rotary_emb = torch.cat([memory_rope, rotary_emb], dim=1)
+            memory_context_length = memory_tokens.shape[1]
+
         history_context_length = hidden_states.shape[1] - original_context_length
 
         if indices_hidden_states is not None and self.zero_history_timestep:
@@ -1466,6 +1573,7 @@ class HeliosTransformer3DModel(
                     original_context_length,
                     original_context_length_list,
                     is_first_denoising_step,
+                    memory_context_length,
                 )
                 if gan_mode and self.is_use_gan and self.is_use_gan_hooks and iidx in self.gan_hooks:
                     logits_hidden.append(hidden_states[:, -original_context_length:, :])
@@ -1481,9 +1589,17 @@ class HeliosTransformer3DModel(
                     original_context_length,
                     original_context_length_list,
                     is_first_denoising_step,
+                    memory_context_length,
                 )
                 if gan_mode and self.is_use_gan and self.is_use_gan_hooks and iidx in self.gan_hooks:
                     logits_hidden.append(hidden_states[:, -original_context_length:, :])
+
+        # Evolving memory write source: last-block hidden states of the noisy
+        # tokens, before output AdaLN/proj (design ch.1 §2). Detached at capture
+        # — encoder gradients flow through the state -> read path, not here.
+        last_hidden = None
+        if capture_last_hidden:
+            last_hidden = hidden_states[:, -original_context_length:, :].detach()
 
         # 5. Output norm, projection & unpatchify
         if temb.ndim == 3:
@@ -1573,6 +1689,11 @@ class HeliosTransformer3DModel(
             del logits_hidden
 
         if not return_dict:
+            # Conditional third element: 4 existing call sites tuple-unpack the
+            # 2-tuple (utils_helios_post.py:329,3212,3295,3350), so the return
+            # arity only changes for capture-aware callers.
+            if capture_last_hidden:
+                return (output, logits, last_hidden)
             return (output, logits)
 
         return Transformer2DModelOutput(sample=output, logits=logits)
