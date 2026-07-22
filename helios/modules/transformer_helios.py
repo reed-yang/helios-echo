@@ -425,7 +425,10 @@ class HeliosAttnProcessor:
                 )
 
         if not enable_cross and memory_context_length > 0 and getattr(attn, "is_amplify_memory", False):
-            scale_mem = attn.get_scale_memory().view(1, 1, -1, 1)
+            # memory_key_scale lives in _keep_in_fp32_modules: cast the scale to
+            # the key dtype, otherwise the mul promotes the slice (and cat the
+            # whole key) to fp32 and flash-attn rejects the q/k dtype mismatch.
+            scale_mem = attn.get_scale_memory().to(key.dtype).view(1, 1, -1, 1)
             key = torch.cat([key[:, :memory_context_length] * scale_mem, key[:, memory_context_length:]], dim=1)
 
         hidden_states = attn_varlen_func(

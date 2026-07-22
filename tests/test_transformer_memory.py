@@ -31,13 +31,11 @@ def _sdpa_attn(q, k, v, attention_mask=None):
     ).transpose(1, 2)
 
 
-def setUpModule():
-    if not torch.cuda.is_available():
-        th.attn_varlen_func = _sdpa_attn
-
-
-def tearDownModule():
-    th.attn_varlen_func = _ORIG_ATTN
+# Patch at IMPORT time (not setUpModule): sibling test modules import the tiny
+# helpers from here and may run first under unittest discover — the patch must
+# be in place regardless of module execution order.
+if not torch.cuda.is_available():
+    th.attn_varlen_func = _sdpa_attn
 
 
 TINY = dict(
@@ -164,6 +162,24 @@ class TestForward(unittest.TestCase):
         self.assertEqual(len(ret_cap), 3)
         self.assertEqual(tuple(ret_cap[2].shape), (B, L_NOISY, DIM))
         self.assertFalse(ret_cap[2].requires_grad)
+
+    def test_fp32_kept_scale_with_half_model(self):
+        # Regression (P1 smoke): from_pretrained keeps memory_key_scale in fp32
+        # while the model runs bf16; the amp branch must cast the scale, or the
+        # key promotes to fp32 and attention rejects the q/k dtype mismatch.
+        _, mem = self._paired_models()
+        mem.to(torch.bfloat16)
+        for block in mem.blocks:
+            block.attn1.memory_key_scale.data = block.attn1.memory_key_scale.data.float()
+        mem.evolving_memory.reset(B)
+        inputs = {
+            k: (v.to(torch.bfloat16) if torch.is_tensor(v) and v.is_floating_point() and v.ndim == 5 else v)
+            for k, v in make_inputs().items()
+        }
+        inputs["encoder_hidden_states"] = inputs["encoder_hidden_states"].to(torch.bfloat16)
+        with torch.no_grad():
+            out = mem(**inputs, memory_tokens=mem.evolving_memory.get_tokens())[0]
+        self.assertEqual(out.dtype, torch.bfloat16)
 
     def test_memory_requires_history_and_t0(self):
         _, mem = self._paired_models()
