@@ -8,8 +8,20 @@
 
 ## Task 0 — Distilled regime mapping (gate, GPU dry-run)
 
-- Source regime: `guidance_scale=1.0`, stage2 pyramid `pyramid_num_inference_steps_list=[2,2,2]`, `is_amplify_first_chunk` (`scripts/inference/helios-distilled_t2v.sh:13-16`). Weights: local snapshot under `/mnt/beegfs/yuheng/Helios/BestWishYSH/Helios-Distilled` (fall back to HF id `BestWishYsh/Helios-Distilled` with `HELIOS_LOCAL_FILES_ONLY=1` unset only if the local dir is incomplete).
-- Map these flags to training-side `HeliosPipeline.__call__` arguments (stage2 path); produce a short param-parity table in the driver's docstring. The released script drives `infer_helios.py` (diffusers_version); we intentionally take the training-side twin per the interim decision.
+- Source regime (`scripts/inference/helios-distilled_t2v.sh:13-16`): `guidance_scale=1.0`, `--is_enable_stage2`, `--pyramid_num_inference_steps_list 2 2 2`, `--is_amplify_first_chunk`. Weights: local snapshot `/mnt/beegfs/yuheng/Helios/BestWishYSH/Helios-Distilled` (verified present: `transformer/` 6-shard fp, `model_index.json` `is_distilled=True`, scheduler `HeliosDMDScheduler`, both `transformer` and `transformer_ode` are 40-layer HeliosTransformer3DModel with `has_multi_term_memory_patch=True`).
+- **Param-parity table (verified against `helios/pipelines/pipeline_helios.py:912-983` __call__ signature — the CRITICAL divergence from the Base rollout smoke is the DMD path):**
+
+  | Released flag (infer_helios.py) | Training-side `__call__` kwarg | Value |
+  |---|---|---|
+  | (distilled ⇒ DMD scheduler) | `use_dmd` | `True` |
+  | `--is_enable_stage2` | `is_enable_stage2` | `True` |
+  | `--pyramid_num_inference_steps_list 2 2 2` | `stage2_num_inference_steps_list` | `[2, 2, 2]` |
+  | (implied by stage2) | `stage2_num_stages` | `3` |
+  | `--is_amplify_first_chunk` | `is_amplify_first_chunk` | `True` |
+  | `--guidance_scale 1.0` | `guidance_scale` | `1.0` |
+  | (memory arm) | `enable_evolving_memory` | `True` / `False` |
+
+  Note: `use_dmd=True` reshapes stepping (`pipeline_helios.py:707-718`: amplify doubles timesteps then trims). This is a DIFFERENT path than the Base rollout smoke (50-step non-DMD, `use_dynamic_shifting=True`) — do NOT copy the Base `GEN_KWARGS`. The released script drives `infer_helios.py` (diffusers_version); we intentionally take the training-side twin per the interim decision.
 - GPU dry-run: load distilled transformer dir via training-side `HeliosTransformer3DModel.from_pretrained` with memory kwargs on; 1-section latent-only generation, assert finite, assert memory module present & untouched by the checkpoint load (fresh M₀ — same expectation as the P1-B smoke).
 - **Sampling-regime risk (run1 NaN lesson):** before any long rollout, run a 5-section latent-only smoke in the mapped regime, both arms finite. A regime that NaNs here is a mapping bug, not a product bug — fix the mapping, do not touch pipeline code without a root-cause report.
 
