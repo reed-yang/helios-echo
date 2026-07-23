@@ -51,6 +51,7 @@ from helios.utils.utils_base import (
 )
 from helios.utils.utils_helios_base import (
     _flow_loss,
+    _memory_single_write,
     prepare_stage1_clean_input_from_latents,
     prepare_stage1_noise_input,
     prepare_stage2_noise_input,
@@ -1423,6 +1424,24 @@ def main(args):
                         dtype=weight_dtype,
                         device=accelerator.device,
                     )
+                    # Retain the D5 write-forward inputs before the batch teardown
+                    # (Stage A single-write simulation, design ch.2 D4/D5). The
+                    # x0 anchor reference survives the name deletion below.
+                    memory_write_batch = None
+                    if (
+                        args.training_config.is_train_memory_module
+                        and not args.training_config.memory_tf_unroll
+                    ):
+                        memory_write_batch = {
+                            "evicted_latents": batch["evicted_latents"].to(
+                                device=accelerator.device, dtype=weight_dtype, non_blocking=True
+                            ),
+                            "evicted_history_latents": batch["evicted_history_latents"].to(
+                                device=accelerator.device, dtype=weight_dtype, non_blocking=True
+                            ),
+                            "evicted_valid_frames": batch["evicted_valid_frames"],
+                            "x0_latents": x0_latents,
+                        }
                     history_latents = None
                     target_latents = None
                     x0_latents = None
@@ -1537,6 +1556,38 @@ def main(args):
                 # Predict the noise residual
                 if not args.training_config.is_train_dmd and not args.training_config.is_use_ode_regression:
                     assert len(noisy_model_input_list) == len(sigmas_list) == len(timesteps_list) == len(targets_list)
+                    # Evolving-memory Stage A: fresh M0 every TF step; with
+                    # memory_single_write_prob simulate ONE eviction write before
+                    # the read (design ch.2 D5). The write forward is no_grad; the
+                    # gated update stays in graph so Enc/gate learn through
+                    # state -> read -> flow loss. Stage B's multi-section unroll
+                    # is a separate path.
+                    memory_tokens = None
+                    if (
+                        args.training_config.is_train_memory_module
+                        and not args.training_config.memory_tf_unroll
+                        and args.data_config.use_stage1_dataset
+                    ):
+                        memory_module = accelerator.unwrap_model(transformer).evolving_memory
+                        memory_module.reset(prompt_embeds.shape[0], device=accelerator.device)
+                        if (
+                            memory_write_batch is not None
+                            and float(torch.rand(())) < args.training_config.memory_single_write_prob
+                        ):
+                            _memory_single_write(
+                                transformer=transformer,
+                                memory_module=memory_module,
+                                evicted_latents=memory_write_batch["evicted_latents"],
+                                evicted_history_latents=memory_write_batch["evicted_history_latents"],
+                                evicted_valid_frames=memory_write_batch["evicted_valid_frames"],
+                                x0_latents=memory_write_batch["x0_latents"],
+                                prompt_embeds=prompt_embeds,
+                                latent_window_size=latent_window_size,
+                                history_sizes=args.training_config.history_sizes,
+                                device=accelerator.device,
+                                dtype=weight_dtype,
+                            )
+                        memory_tokens = memory_module.get_tokens(dtype=weight_dtype)
                     logs = _flow_loss(
                         args=args,
                         accelerator=accelerator,
@@ -1559,6 +1610,7 @@ def main(args):
                         global_step=global_step,
                         noise_scheduler_copy=noise_scheduler_copy,
                         use_clean_input=use_clean_input,
+                        memory_tokens=memory_tokens,
                     )
                     optimizer.step()
                     lr_scheduler.step()

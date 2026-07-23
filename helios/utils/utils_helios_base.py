@@ -229,6 +229,101 @@ def _flow_loss(
     return logs
 
 
+def _memory_single_write(
+    transformer,
+    memory_module,
+    evicted_latents,
+    evicted_history_latents,
+    evicted_valid_frames,
+    x0_latents,
+    prompt_embeds,
+    latent_window_size,
+    history_sizes,
+    device,
+    dtype,
+):
+    """One TF eviction write (design ch.2 D5, Stage A single-write simulation).
+
+    A no_grad CLEAN forward at t=0 over the evicted frames (X_Noisy at the
+    sample's bucket resolution) conditioned on their preceding full-res
+    history, captured at the last block; then an IN-GRAPH gated update so
+    Enc/gate gradients arrive through the state -> read -> flow-loss path.
+    Samples with evicted_valid_frames == 0 (design D4: k <= 2 evictions are
+    all-zero) keep their prior state via a post-update blend — the module's
+    all-masked assert stays intact because those samples get a dummy
+    all-True mask whose result the blend discards.
+
+    transformer may be accelerator-wrapped (forward goes through the
+    wrapper); memory_module must be the UNWRAPPED evolving_memory.
+    Returns the number of samples actually written.
+    """
+    assert memory_module.query_state is not None, "call reset() before the write"
+    valid = torch.as_tensor(
+        [int(v) for v in evicted_valid_frames], dtype=torch.long, device=device
+    )
+    if not bool((valid > 0).any()):
+        return 0
+
+    (
+        write_input,
+        indices_hidden_states,
+        indices_latents_history_short,
+        indices_latents_history_mid,
+        indices_latents_history_long,
+        latents_history_short,
+        latents_history_mid,
+        latents_history_long,
+    ) = prepare_stage1_clean_input_from_latents(
+        history_latents=evicted_history_latents,
+        target_latents=evicted_latents,
+        x0_latents=x0_latents,
+        latent_window_size=latent_window_size,
+        history_sizes=history_sizes,
+        is_keep_x0=True,
+        dtype=dtype,
+        device=device,
+    )
+
+    batch_size = write_input.shape[0]
+    timesteps = torch.zeros(batch_size, device=device)
+    with torch.no_grad():
+        outputs = transformer(
+            hidden_states=write_input,
+            timestep=timesteps,
+            encoder_hidden_states=prompt_embeds,
+            indices_hidden_states=indices_hidden_states.to(device),
+            indices_latents_history_short=indices_latents_history_short.to(device),
+            indices_latents_history_mid=indices_latents_history_mid.to(device),
+            indices_latents_history_long=indices_latents_history_long.to(device),
+            latents_history_short=latents_history_short,
+            latents_history_mid=latents_history_mid,
+            latents_history_long=latents_history_long,
+            capture_last_hidden=True,
+            return_dict=False,
+        )
+        evicted_hidden = outputs[2]
+
+    seq_len = evicted_hidden.shape[1]
+    assert seq_len % latent_window_size == 0, (
+        f"captured length {seq_len} not divisible by window {latent_window_size}"
+    )
+    tokens_per_frame = seq_len // latent_window_size
+    # Valid frames are the LAST `valid` of the evicted 9 (zero-prefix frames come
+    # first temporally); expand to token granularity. valid == 0 -> all-True dummy.
+    token_pos = torch.arange(seq_len, device=device).unsqueeze(0)
+    threshold = (latent_window_size - valid).clamp(min=0).unsqueeze(1) * tokens_per_frame
+    frame_mask = token_pos >= threshold
+    frame_mask[valid == 0] = True
+
+    old_state = memory_module.query_state
+    memory_module.update(evicted_hidden, frame_mask=frame_mask, sigma_last=0.0)
+    write_mask = (valid > 0).view(-1, 1, 1)
+    memory_module.query_state = torch.where(
+        write_mask, memory_module.query_state, old_state
+    )
+    return int((valid > 0).sum())
+
+
 # ======================================== easy anti-drifting ========================================
 
 
