@@ -86,4 +86,7 @@
 - [x] trainer batch-prep 证据 7 卡全中 → logs/research/read-trainer-batch-prep-anchors.md（tier: long=[:16]/mid=[16:18]/short=[x0,1x]；写前向必须复用 `prepare_stage1_clean_input_from_latents`；t=0 需显式传入）
 - [x] Task 3a：`_flow_loss_section` 原语抽取 + `memory_tokens` 贯通 — commit 4929521（无内部 backward，caller 掌管 sync 边界；`_flow_loss` 行为等价保留）
 - 测试面：全套 61 绿
-- 待做（Task 3 剩余）：3b 写前向 + Stage A 单写混合接线（决策已固化于计划 Task 3 节：批级写决策+样本级 blend、token 级 mask、σ_last=0、留存 evicted 字段于 batch 删除之前）→ 3b 对抗审查 → 3c U-展开循环（Stage B）→ Task 5 配置分叉 → 1 节点 smoke profile 门
+- [x] Task 3b：单写模拟 helper `_memory_single_write` + trainer 接线 — commit e36d659（no_grad t=0 捕获前向 + 图内门控 update；批级写决策+样本级 blend+token 级 mask 全兑现）
+- [x] 3a/3b 对抗审查闭环 — commit 48132c1：3a 等价性 CLEAN；3b 抓到 blocking=全零 early-return 逐 rank 决策致多卡 collective 错位卡死（修：确定性掷币 + 写步全 rank 跑前向）；审查同时反驳了 find_unused_parameters 担忧（DDP 沿输入边遍历，2-rank 复现梯度可达）
+- 测试面：全套 64 绿
+- 待做：Task 5 配置分叉（Sol worker 实现中）→ ≥2 卡 DDP smoke profile（必须覆盖 rank 间混合全零/有效驱逐；启动真训练需用户拍板）→ 3c U-展开循环（Stage B 期）；P2 Task 0 配方映射 GPU dry-run 可交错
