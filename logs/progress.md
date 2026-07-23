@@ -82,5 +82,8 @@
 - [x] D4 对抗审查抓到 blocking：低分辨率桶的驱逐帧取自全分辨率 source timeline，而 D5 中驱逐帧是写前向的 X_Noisy、必须随桶分辨率——修为双 timeline 角色分离（X_Noisy=桶 `continue_vae_latent`，history=全分辨率 source，与既有 history 条件契约一致）— commit e064ad9；其余审查角度全 CLEAN
 - [x] Task 2 / D6 展开参数 — commit 3729bed（start_section_idx 并入逐样本 seeded 流并返回，修 F3；首抽与旧行为逐位等价有 parity 测试；`return_rollout_metadata` 门控 start+逐 section prompts；载入后内存过滤 sections=num_frame//33——有意偏离设计的"cache 按 U 失效"：共享数据目录的 cache 会被不校验的旧读者误载，改为不写 U 特化 cache；trainer 接线三 flag）
 - [x] Task 3 实现决策预先固化（计划文档 Task 3 节）：批级写决策+样本级 blend、token 级 mask 展开、TF 写 σ_last=0、驱逐分辨率角色
-- 在飞：D6 对抗审查（Sol）；trainer batch-prep 证据抽取（Terra → read-trainer-batch-prep-anchors.md，Task 3 最后一块未知）
-- 测试面：全套 56 绿（eviction 4 + unroll 6 新增）
+- [x] D6 对抗审查闭环 — commit 09faaf3：major=persistent workers 收不到 `_epoch`（上游既有缺陷，已入 findings 待同步主线；修为 mp.Value 共享 epoch）；minor=U-rollout 中途切 caption（修为一次 rollout 抽一次并复用）；七个反驳角度全确认
+- [x] trainer batch-prep 证据 7 卡全中 → logs/research/read-trainer-batch-prep-anchors.md（tier: long=[:16]/mid=[16:18]/short=[x0,1x]；写前向必须复用 `prepare_stage1_clean_input_from_latents`；t=0 需显式传入）
+- [x] Task 3a：`_flow_loss_section` 原语抽取 + `memory_tokens` 贯通 — commit 4929521（无内部 backward，caller 掌管 sync 边界；`_flow_loss` 行为等价保留）
+- 测试面：全套 61 绿
+- 待做（Task 3 剩余）：3b 写前向 + Stage A 单写混合接线（决策已固化于计划 Task 3 节：批级写决策+样本级 blend、token 级 mask、σ_last=0、留存 evicted 字段于 batch 删除之前）→ 3b 对抗审查 → 3c U-展开循环（Stage B）→ Task 5 配置分叉 → 1 节点 smoke profile 门
