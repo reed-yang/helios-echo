@@ -17,6 +17,80 @@ logger = get_logger(__name__)
 # ======================================== flow loss ========================================
 
 
+def _flow_loss_section(
+    args,
+    transformer,
+    prompt_embeds,
+    noisy_model_input,
+    sigmas,
+    timesteps,
+    target,
+    indices_hidden_states,
+    latents_history_short,
+    indices_latents_history_short,
+    latents_history_mid,
+    indices_latents_history_mid,
+    latents_history_long,
+    indices_latents_history_long,
+    memory_tokens=None,
+):
+    """One flow-matching loss term: forward + weighted MSE, NO backward.
+
+    Section-level primitive (design ch.2 D7): the caller owns backward and
+    sync boundaries, so the memory unroll loop can backward per section under
+    no_sync while `_flow_loss` keeps its historical internal-backward
+    behavior. Returns (loss, model_pred); model_pred is needed by the
+    error-recycling consumer downstream of backward.
+    """
+    model_pred = transformer(
+        hidden_states=noisy_model_input,
+        timestep=timesteps,
+        encoder_hidden_states=prompt_embeds,
+        indices_hidden_states=indices_hidden_states,  # torch.Size([2, 9])
+        indices_latents_history_short=indices_latents_history_short,  # torch.Size([2, 2])
+        indices_latents_history_mid=indices_latents_history_mid,  # torch.Size([2, 2])
+        indices_latents_history_long=indices_latents_history_long,  # torch.Size([2, 16])
+        latents_history_short=latents_history_short,  # torch.Size([2, 16, 2, 60, 104])
+        latents_history_mid=latents_history_mid,  # torch.Size([2, 16, 2, 60, 104])
+        latents_history_long=latents_history_long,  # torch.Size([2, 16, 16, 60, 104])
+        memory_tokens=memory_tokens,
+        return_dict=False,
+    )[0]
+
+    # Compute regular loss.
+    if isinstance(model_pred, list):
+        loss_list = []
+        for cur_model_pred, cur_target, cur_sigmas in zip(model_pred, target, sigmas):
+            cur_weighting = compute_loss_weighting_for_sd3(
+                weighting_scheme=args.training_config.weighting_scheme, sigmas=cur_sigmas
+            )
+            loss = torch.mean(
+                (cur_weighting.float() * (cur_model_pred.float() - cur_target.float()) ** 2).reshape(
+                    cur_target.shape[0], -1
+                ),
+                1,
+            ).mean()
+            loss_list.append(loss)
+        loss = torch.stack(loss_list, dim=0).mean()
+        del loss_list
+    else:
+        # these weighting schemes use a uniform timestep sampling
+        # and instead post-weight the loss
+        weighting = compute_loss_weighting_for_sd3(
+            weighting_scheme=args.training_config.weighting_scheme, sigmas=sigmas
+        )
+
+        loss = torch.mean(
+            (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+            1,
+        ).mean()
+
+    # loss = loss * (batch_size / total_sample_count)
+    assert loss.requires_grad, f"Loss should have gradient! Got {loss.requires_grad}"
+    assert loss.grad_fn is not None, "Loss should have grad_fn!"
+    return loss, model_pred
+
+
 def _flow_loss(
     args,
     accelerator,
@@ -39,6 +113,7 @@ def _flow_loss(
     global_step,
     noise_scheduler_copy,
     use_clean_input,
+    memory_tokens=None,
 ):
     assert len(noisy_model_input_list) == len(sigmas_list) == len(timesteps_list) == len(targets_list)
 
@@ -46,51 +121,23 @@ def _flow_loss(
         noisy_model_input_list, sigmas_list, timesteps_list, targets_list
     ):
         # ----- w/o mini batch ------
-        model_pred = transformer(
-            hidden_states=noisy_model_input,
-            timestep=timesteps,
-            encoder_hidden_states=prompt_embeds,
-            indices_hidden_states=indices_hidden_states,  # torch.Size([2, 9])
-            indices_latents_history_short=indices_latents_history_short,  # torch.Size([2, 2])
-            indices_latents_history_mid=indices_latents_history_mid,  # torch.Size([2, 2])
-            indices_latents_history_long=indices_latents_history_long,  # torch.Size([2, 16])
-            latents_history_short=latents_history_short,  # torch.Size([2, 16, 2, 60, 104])
-            latents_history_mid=latents_history_mid,  # torch.Size([2, 16, 2, 60, 104])
-            latents_history_long=latents_history_long,  # torch.Size([2, 16, 16, 60, 104])
-            return_dict=False,
-        )[0]
-
-        # Compute regular loss.
-        if isinstance(model_pred, list):
-            loss_list = []
-            for cur_model_pred, cur_target, cur_sigmas in zip(model_pred, target, sigmas):
-                cur_weighting = compute_loss_weighting_for_sd3(
-                    weighting_scheme=args.training_config.weighting_scheme, sigmas=cur_sigmas
-                )
-                loss = torch.mean(
-                    (cur_weighting.float() * (cur_model_pred.float() - cur_target.float()) ** 2).reshape(
-                        cur_target.shape[0], -1
-                    ),
-                    1,
-                ).mean()
-                loss_list.append(loss)
-            loss = torch.stack(loss_list, dim=0).mean()
-            del loss_list
-        else:
-            # these weighting schemes use a uniform timestep sampling
-            # and instead post-weight the loss
-            weighting = compute_loss_weighting_for_sd3(
-                weighting_scheme=args.training_config.weighting_scheme, sigmas=sigmas
-            )
-
-            loss = torch.mean(
-                (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                1,
-            ).mean()
-
-        # loss = loss * (batch_size / total_sample_count)
-        assert loss.requires_grad, f"Loss should have gradient! Got {loss.requires_grad}"
-        assert loss.grad_fn is not None, "Loss should have grad_fn!"
+        loss, model_pred = _flow_loss_section(
+            args=args,
+            transformer=transformer,
+            prompt_embeds=prompt_embeds,
+            noisy_model_input=noisy_model_input,
+            sigmas=sigmas,
+            timesteps=timesteps,
+            target=target,
+            indices_hidden_states=indices_hidden_states,
+            latents_history_short=latents_history_short,
+            indices_latents_history_short=indices_latents_history_short,
+            latents_history_mid=latents_history_mid,
+            indices_latents_history_mid=indices_latents_history_mid,
+            latents_history_long=latents_history_long,
+            indices_latents_history_long=indices_latents_history_long,
+            memory_tokens=memory_tokens,
+        )
 
         # Full fine-tune + DeepSpeed ZeRO-2: every trainable param MUST receive a gradient or ZeRO's
         # reduction hook crashes on a None grad ('NoneType' has no attribute 'view'). On t2v
