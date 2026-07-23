@@ -57,6 +57,13 @@
 
 - P1-B 臂（Helios-Base 直载）13/13 PASS；P1-A1 臂（transformer_init + lora368@19500 + partial 装配）9/9 PASS → 生产加载与训练谱系装配两条路径均与 memory 模块兼容，off-path 等价在真权重成立。
 - rollout 冒烟 run1：状态机全对（3 写/队列[3,4]/逐条目σ），开销 +5.6%（验收线 12%），NaN 根因 = 冒烟自身调用偏离验证采样配置（8步+固定mu=1+空负提示），产品代码无缺陷（Sol worker 对照 log_validation/infer 双基准 + diff 复核）。
+## 基础设施与数据资产发现（2026-07-23 凌晨）
+
+- **368×640 语料失踪（硬阻塞）**：旧路径在 xiangbo reorg 的 delete_list.sh 中；canonical tree yaml 计划了 `human_single/latents`（n=168431 硬链接）但目录从未创建；demo latents 同灭；原始视频+manifest 完好可重编码。恢复由用户操办。
+- **mc-node01 闲置真因**：非仅 GPU2 硬件——`nvidia_uvm` 不干净卸载（07-22 20:08）致整节点 CUDA init 失败；rmmod/modprobe 修复后 7/8 卡可用。nvidia-smi 正常≠CUDA 可用（NVML 不经 uvm）。
+- **Slurm 24.05.7**：partition 级 `DefMemPerGPU/DefCpuPerGPU` + reconfigure 两次复现全节点注册 INVAL（配置同步与否无关→参数触发）；无公开 bug 票；替代 = job_submit.lua（调查报告入库）。恢复程序：配置一致 → 逐节点重启 slurmd → resume。
+- **trainer 配置快照校验**：output_dir 里的快照会在重启时逐键比对，schema 演进后旧 scratch 目录必须清理。
+
 ## 实现期对抗审查发现（2026-07-23，Stage A Task 1/2 批次）
 
 - **上游既有缺陷（值得同步主线）**：stage-1 dataset 的 `_epoch` 是普通 int，persistent DataLoader workers（谱系配置 8 workers）持 fork 副本，主进程 `set_epoch` 永不到达——`choice_idx` 的逐样本 seeded 流跨 epoch 塌缩为创建时 epoch 的固定值（审查 worker 用 StatefulDataLoader 实测复现；影响 xiangbo 现行训练的跨 epoch 数据增广）。本 fork 修复：epoch 放 `multiprocessing.Value`（fork 继承下 set_epoch 实时可见，spawn pickling 降级为冻结 int 不劣于现状）。

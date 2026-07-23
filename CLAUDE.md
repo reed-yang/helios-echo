@@ -40,6 +40,7 @@ Directory placement establishes document type; date prefixes establish chronolog
 | `docs/specs/` / `docs/plans/` | design contracts / executable plans (plan links its spec; pre-scale gates mandatory) | yes | `YYYY-MM-DD-<kebab>-design/-plan.md` |
 | `logs/findings.md` / `logs/progress.md` | evidence ledger (conclusion-first, `file:line`, job IDs, ruled-out hypotheses) / execution ledger | yes | append immediately, commit in batches |
 | `logs/research/` | curated agent reports & run verdicts | yes | `read-*/design-*/…-verdict-*.md` |
+| `logs/session-ckpts/` | session checkpoints: single-entry context-reload snapshots (state matrix, blockers, next actions) | yes | `YYYY-MM-DD-session-checkpoint.md` |
 | `agent-research/` | my-docs role: per-concept append-only ledgers (session tracking, scheduling notes); raw conversation exports (provenance, never edit) | no (new files local) | `YYYY-MM-DD-<core-concept>.md` (date = inception, for ordering); similar/ongoing topics APPEND dated sections to the existing ledger instead of new files (edits only for significant errors) |
 | `results/` | generated artifacts: run logs, videos, eval outputs | no | per-run files |
 
