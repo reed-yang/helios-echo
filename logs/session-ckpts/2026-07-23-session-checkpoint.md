@@ -4,6 +4,8 @@
 
 ## 一、硬阻塞(恢复后第一件事)
 
+> **【2026-07-23 晚已解除】** R2 备份(`openhumanvid-backup/Xiangbo_july_8/helios_organized/human_single/latents.tar`, 2.53TB)恢复了 40GB 子集(2,869 clips → `/mnt/beegfs/siyuan/dataset/human_single_368x640_subset/latents`);本节动作序列 ①②③ 已全部执行完毕(YAML 已指向子集 be4d654;smoke run7 3/3 PASS;DDP smoke 5/5 PASS + 重放证据)。**剩余 = ④ 用户拍板**,且真训练前须全量恢复语料并 REPOINT 主 YAML。详见 `logs/progress.md` "2026-07-23 晚" 节。原文如下留档。
+
 **368×640 latent 语料从盘上消失,等用户恢复数据**(用户已知,说"数据稍后才恢复")。
 - 证据:旧路径 `/mnt/beegfs/dataset/video_single_24FPS/latents_cfr_int_30b_368x640` 在 xiangbo `helios_runs/scripts/reorg/delete_list.sh` 删除清单中;canonical tree(`helios_organized/human_single/dataset.yaml`)计划了 `latents/` 子目录(n=168431,硬链接方案)但从未落地;demo latents 同灭;原始视频与 manifest 完好。
 - **数据恢复后的动作序列**(无需重新决策):① 确认新语料路径 → 更新两份 YAML 的 `instance_data_root`(`scripts/training/configs/stage1_lora_mem368_A{,_smoke}.yaml`)→ ② smoke run7(单卡,命令在 smoke YAML 头部注释;先 `rm -rf /mnt/beegfs/siyuan/helios_runs/smoke_stage_a` 清配置快照)→ ③ ≥2 卡 DDP smoke(必须覆盖 rank 间混合全零/有效驱逐——3b 审查 blocker 的验证项)→ ④ 用户拍板 Stage A 真训练。

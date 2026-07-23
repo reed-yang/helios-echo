@@ -75,3 +75,11 @@
 - Task 3b 审查反驳项（重要排险）：`find_unused_parameters=True` 与图外 update **不是**失败模式——DDP 自 forward 输出反向遍历会沿 `memory_tokens` 输入边继续到 Enc/query_init 上游（审查 worker 2-rank 最小复现确认梯度可达）；D4 mask 方向、capture 契约、blend dtype/device、trainer 作用域、逐 micro-step reset 语义均核对通过。
 
 - **rollout 冒烟 run2（终局）：8/8 ALL PASS**（job 5552, c-node06, ~48 min）——修正采样配置后双臂 latents 均有限，NaN 根因判定实锤；状态机与 run1 逐项一致；开销 +5.5%、峰值 43.3 GiB；σ_last=0.122≠0 实测确认 FiLM(σ_last) 写条件化为必要设计（呼应总纲 §二 σ_last 偏差项）。verdict: `logs/research/rollout-smoke-verdict-run2.md`。**管线状态机 GPU 门全绿，M1 训练链四批次（模块/transformer/trainer/管线）全部收口。**
+
+## 数据恢复与训前门收口（2026-07-23 晚）
+
+- **语料备份存在且可用**：R2 `openhumanvid-backup/Xiangbo_july_8/helios_organized/` 是 xiangbo reorg canonical tree 的完整备份（human_single: latents.tar 2.53TB=168,431 clips + mp4_cfr.tar 167GB + captions.jsonl + dataset.yaml，provenance 指向已删除的原路径）。恢复通道 = rclone r2: remote 流式 `cat|tar`；tar 顺序格式支持 `--count/--offset` 切片与断点扩容,无需全量下载。
+- **子集规模决策**：BeeGFS 97% 满（2.3T 剩）→ 40GB 头部切片（2,869 clips ≈ 语料 1.7%）。实测 tar 头部即含 121–501 帧混布,sections 直方图 3:830/4:993/≥5:1,046——全零驱逐(3 sections, k≤2)与有效驱逐(≥4 sections, k≥3)两侧充足,足够 smoke/DDP/小 pilot；**真 Stage A 训练必须全量恢复后 REPOINT**（主 YAML 有醒目注释）。
+- **训前门全关**：②单卡 smoke（3 步,checkpoint 84 partial=78 memory+6 patch,query_state 零泄漏,v2 cache 生产原子落盘）③双卡 DDP（5 步零 NCCL 错误）+ 确定性重放证据（step 3/4/5 跨 rank 混合驱逐 5 对,双次重放逐字节一致,logs/research/ddp-smoke-draw-replay.md）——3b 审查设立的 DDP 验证条件全部实证。
+- **latent .pt 载荷结构**（实测）：`{vae_latent (num_sections,16,9,46,80), prompt_embed (512,4096), prompt_embed_short (512,4096), prompt_raw, first_frames_image}`——离线预切 section、双 caption 版本内嵌（caption_version 抽签的物理来源）。
+- **v2 cache 缺陷回移**：上游移植的对抗审查发现 `_validate_cache_payload` 只验 `samples[0]`（混合合法/非法载荷漏过→后续 single_res 过滤 TypeError 而非静默重建）；fork 同缺陷已修（878a6f0）+ 上游 PR 版本已含全样本校验。

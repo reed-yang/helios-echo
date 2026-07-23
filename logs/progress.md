@@ -101,3 +101,14 @@
 - [x] mc-node01 修复：GPU2 硬件问题之外，nvidia_uvm 不干净卸载致**整节点** CUDA 死（这才是它闲置的真因）；rmmod/modprobe 后 7/8 卡可用
 - [x] 388k 扫描修复（用户批准）：v2 cache — commit be8ce09；对抗审查 3 blocking+2 major 全修 — commit 4108ab1（原子发布/自愈全覆盖/只读降级/断言范围化/配置翻转激活）；测试面 79 绿
 - [!] **硬阻塞（需用户/xiangbo 决策）**：368×640 latent 语料已从盘上消失——重组只写了 yaml 计划（human_single/latents, n=168431）但目录从未落地，demo latents 同灭；原始视频（videos_cfr_int + bprime）与 manifest 仍在，可重编码。smoke run4-6 均未及数据关（分别死于 CUDA/配置快照/排队+取消）。选项：A 问 xiangbo 数据去向（S3/他处）；B tools/offload_data 重编码（先子集起 smoke，后全量）；C wan22 704×1280 语料不可行（C5 冻结 + 谱系不匹配）
+
+## 2026-07-23 晚（R2 数据恢复 + 训前门②③关闭 + 上游 PR 就绪）
+
+- [x] **语料恢复（硬阻塞解除）**：R2 备份 `openhumanvid-backup/Xiangbo_july_8/helios_organized/human_single/` 验明正身（dataset.yaml provenance 指向原路径；latents.tar 2.53TB / 168,431 clips）。BeeGFS 97% 满（剩 2.3T）→ 全量放不下，**决策 = 40GB 头部流式切片**（`rclone cat --count | tar -x`，tar 顺序性支持日后 `--offset` 断点扩容）→ `/mnt/beegfs/siyuan/dataset/human_single_368x640_subset/latents`：2,869 files（删 1 截断尾）+ captions.jsonl + dataset.yaml。验证：sections 直方图 3:830/4:993/≥5:1,046（121–501 帧），torch.load 三点抽检 OK（vae_latent (k,16,9,46,80) 离线预切、双 caption 版本、UMT5 512×4096）— 混合驱逐两侧样本充足
+- [x] 两份 Stage A YAML 指向子集（正式配置带 REPOINT 注释：真训练前必须换全量）— commit be4d654；smoke scratch 清理
+- [x] **smoke run7（门②）ALL PASS**：mc-node01 单卡，3/3 步 loss/grad 有限，EXIT_CODE 0；checkpoint 结构精确（partial 84 = 78 memory 键 + 6 patch conv；**query_state 不在 state_dict**）；v2 cache 生产首落盘且无 tmp 残留（原子发布实证）— log: results/smoke_stage_a_run7.log
+- [x] **DDP smoke run1（门③）ALL PASS**：mc-node01 双卡 5/5 步，EXIT_CODE 0，零 NCCL/Traceback，checkpoint 结构与单卡一致 — log: results/smoke_stage_a_ddp_run1.log（job 5626）
+- [x] 门③证据不靠概率：Sol worker 确定性重放（同 seed/采样器，双次逐字节一致）→ R0=[0,8,0,0,0,9,8,0,9,9] / R1=[0,9,0,0,9,9,0,9,0,0]，**step 3/4/5 存在跨 rank 零/非零混合驱逐**（5 个并发 pair）→ 3b blocker 的验证条件实证闭环 — logs/research/ddp-smoke-draw-replay.md
+- [x] 上游 PR 就绪（等用户 push）：worktree helios-upstream-pr 分支 fix/stage1-dataset-epoch-and-cache-v2（73b2d47 epoch + 0f27099 cache，基于 team@34f5a99）；7-agent 工作流 + 双镜头对抗审查 + 两轮修复 PASS + 主 agent 亲核 diff（4 文件 +457/−22 零泄漏）；PR 正文 logs/research/upstream-pr-dataset-fixes.md — commit 972bde2
+- [x] 审查反哺 fork：`_validate_cache_payload` 只验 samples[0] 的缺陷回移修复 + 回归测试 — commit 878a6f0（cache 套件 10/10）
+- **状态：训前验证梯子全部完成（①单测 79 绿 ②单卡 smoke ③DDP smoke + 重放证据）。Stage A 真训练只差：全量语料恢复 + 用户拍板。**
