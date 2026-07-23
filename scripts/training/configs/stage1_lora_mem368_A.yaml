@@ -188,6 +188,7 @@ training_config:
   # ---- Evolving Memory ----
   is_enable_evolving_memory: true
   memory_num_query_frames: 3
+  memory_frame_hw: [12, 20]
   memory_enc_num_layers: 2
   memory_gate_init_bias: 0.75
   is_amplify_memory: true

@@ -319,6 +319,15 @@ def main(args):
         "restrict_lora_rank": args.training_config.restrict_lora_rank,
         "is_amplify_history": args.training_config.is_amplify_history,
         "history_scale_mode": args.training_config.history_scale_mode,
+        # Evolving memory (design ch.2 D2: every shape-affecting field flows
+        # through this ONE dict, which also feeds the DS-resume/EMA/merge
+        # reconstruction sites). The critic dict deliberately omits these (D8-5).
+        "is_enable_evolving_memory": args.training_config.is_enable_evolving_memory,
+        "memory_num_query_frames": args.training_config.memory_num_query_frames,
+        "memory_frame_hw": tuple(args.training_config.memory_frame_hw),
+        "memory_enc_num_layers": args.training_config.memory_enc_num_layers,
+        "memory_gate_init_bias": args.training_config.memory_gate_init_bias,
+        "is_amplify_memory": args.training_config.is_amplify_memory,
     }
     transformer = HeliosTransformer3DModel.from_pretrained(
         args.model_config.transformer_model_name_or_path,

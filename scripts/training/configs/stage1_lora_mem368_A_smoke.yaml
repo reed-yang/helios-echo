@@ -27,7 +27,9 @@ data_config:
   use_shuffle: true
   pin_memory: true
   persistent_workers: true
-  force_rebuild: false          # smoke: load the shared corpus cache read-only
+  force_rebuild: true           # trainer invariant: single_res REQUIRES force_rebuild
+                                # (train_helios.py:2766); rebuild does not write the
+                                # shared cache, it just re-scans (~388k filenames)
   single_res: true
   single_height: 368
   single_width: 640
@@ -185,6 +187,7 @@ training_config:
   # ---- Evolving Memory (SMOKE: write every step) ----
   is_enable_evolving_memory: true
   memory_num_query_frames: 3
+  memory_frame_hw: [12, 20]
   memory_enc_num_layers: 2
   memory_gate_init_bias: 0.75
   is_amplify_memory: true

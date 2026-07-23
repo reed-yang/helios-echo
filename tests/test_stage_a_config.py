@@ -25,6 +25,7 @@ class TestStageAConfig(unittest.TestCase):
         expected_keys = {
             "is_enable_evolving_memory",
             "memory_num_query_frames",
+            "memory_frame_hw",
             "memory_enc_num_layers",
             "memory_gate_init_bias",
             "is_amplify_memory",

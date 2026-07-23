@@ -458,6 +458,9 @@ class TrainingConfig:
     # module lands (single-complete-dict rule, ch.2 D2).
     is_enable_evolving_memory: bool = field(default=False)
     memory_num_query_frames: int = field(default=3)
+    # Shape-affecting (M = N_Q * h * w): must flow through the one construction
+    # dict (design ch.2 D2), so it lives in the config, not only the model default.
+    memory_frame_hw: list[int] = field(default_factory=lambda: [12, 20])
     memory_enc_num_layers: int = field(default=2)
     memory_gate_init_bias: float = field(default=0.75)
     is_amplify_memory: bool = field(default=False)
