@@ -1,11 +1,24 @@
-output_dir: /mnt/beegfs/siyuan/helios_runs/stage1_lora_mem368_A
+# Stage A MICRO-TRAIN SMOKE — pre-training gate ② (not the real run).
+# Derived from stage1_lora_mem368_A.yaml; differences ONLY:
+#   - transformer = plain Helios-Base transformer_init (does NOT wait for the
+#     merged ancestor base: the smoke tests trainer MECHANICS, not quality)
+#   - 3 optimizer steps, bs1, accum2, 2 workers, force_rebuild off
+#   - checkpointing_steps 2: exercises the save hooks ONCE (lora + partial
+#     incl. the memory section-5 persistence) inside the smoke
+#   - memory_single_write_prob 1.0: the write path must execute every step
+# Launch (single GPU, WANDB_MODE=offline):
+#   srun -p gpu --gres=gpu:h200:1 --time=01:00:00 bash -c \
+#     "cd /mnt/beegfs/siyuan/workspace/helios-echo && WANDB_MODE=offline PYTHONPATH=. \
+#      /mnt/beegfs/yuheng/miniconda3/envs/helios/bin/accelerate launch --num_processes 1 \
+#      --mixed_precision bf16 train_helios.py --config scripts/training/configs/stage1_lora_mem368_A_smoke.yaml"
+output_dir: /mnt/beegfs/siyuan/helios_runs/smoke_stage_a
 logging_dir: logs
 seed: 44
 
 
 report_to:
   tracker_name: Helios-Train
-  wandb_name: stage1_lora_mem368_A
+  wandb_name: smoke_stage_a
   report_to: wandb
 
 
@@ -14,39 +27,32 @@ data_config:
   use_shuffle: true
   pin_memory: true
   persistent_workers: true
-  force_rebuild: true
+  force_rebuild: false          # smoke: load the shared corpus cache read-only
   single_res: true
   single_height: 368
   single_width: 640
-  dataloader_num_workers: 8
+  dataloader_num_workers: 2     # smoke: light workers
   prefetch_factor: 2
   caption_dropout_p: 0
   id_token: ""
   # ---- Stage 1 ----
   use_stage1_dataset: true
   instance_data_root:
-    # SAME corpus as stage1_lora_cfr_368: merged cfr_int + cfr_int_bprime (~388k clips >=121f) at 368x640.
     - "/mnt/beegfs/dataset/video_single_24FPS/latents_cfr_int_30b_368x640"
 
 
 model_config:
   # ---- Path ----
   pretrained_model_name_or_path: "/mnt/beegfs/yuheng/Helios/BestWishYSH/Helios-Distilled"
-  # MERGED base: ancestor checkpoint-19500 (lora368_correct) fully fused into the
-  # backbone via tools/merge_lora_full_for_helios.py. Stage A cannot fork by
-  # checkpoint-resume: its trainable set (memory only, backbone frozen) differs
-  # from the ancestor's, so accelerate load_state would crash on the optimizer
-  # state. The frozen fresh LoRA the trainer injects has a zero delta (B=0), so
-  # the merged function is preserved exactly.
-  transformer_model_name_or_path: "/mnt/beegfs/siyuan/helios_runs/_merged/stage1_lora368_correct_merged19500"
-  subfolder: "transformer"
+  transformer_model_name_or_path: "/mnt/beegfs/xiangbo/.cache/huggingface/hub/models--BestWishYsh--Helios-Base/snapshots/21cf91da9cae0270a9405000c2e798f83770b1dd"
+  subfolder: "transformer_init"
   load_checkpoints_custom: false
   load_dcp: false
   # ---- Vae ----
   upcast_vae: true
   enable_slicing: false
   enable_tiling: false
-  # ---- LoRA r128 (MUST match stage1_lora_cfr_368 exactly for adapter state-dict compat) ----
+  # ---- LoRA r128 (matches the Stage A config; frozen by memory_freeze_backbone) ----
   lora_rank: 128
   lora_alpha: 128.0
   lora_dropout: 0.0
@@ -59,7 +65,6 @@ model_config:
 
 
 validation_config:
-  # Built-in validation DISABLED (external eval handles inference). Keep a prompt so config validates.
   validation_steps: 100000000
   validation_height: 368
   validation_width: 640
@@ -71,7 +76,6 @@ validation_config:
     - 9
   num_validation_videos: 1
   num_inference_steps: 50
-  # ---- Dynamic Shifting ----
   use_dynamic_shifting: true
   time_shift_type: "exponential"
   first_step_valid: false
@@ -86,25 +90,19 @@ training_config:
   upcast_before_saving: false
   offload: false
   mixed_precision: "bf16"
-  # ---- Training Resource ----
-  # Stage A (design ch.2 D3): FRESH run on the merged ancestor base — NOT a
-  # checkpoint-resume fork (see transformer_model_name_or_path note). global_step
-  # starts at 0; ~4k memory-only steps, warmup 500 applies to the memory LR.
-  # resume_from_checkpoint=latest is crash-resume within THIS run only.
-  # Recipe inherited unchanged from the _correct ancestor: Blur (corrupt_mode_history
-  # random), I2V drop, Saturation (docs/HELIOS_CORRECT_RECIPE.md).
-  max_train_steps: 4000
-  train_batch_size: 2           # per-GPU; x40 GPU x accum2 = global batch 160 (5 nodes)
+  # ---- Training Resource (SMOKE) ----
+  max_train_steps: 3
+  train_batch_size: 1
   gradient_accumulation_steps: 2
-  checkpointing_steps: 500
-  checkpoints_total_limit: 30
+  checkpointing_steps: 2
+  checkpoints_total_limit: 1
   resume_from_checkpoint: "latest"
   save_checkpoints_custom: false
-  skip_dataloader_dcp: true   # resume is world-size agnostic (56->40 ranks OK); no exact dataloader pos
+  skip_dataloader_dcp: true
   scale_lr: false
   # ---- Optimizer ----
-  learning_rate: 1e-5           # was 3e-5; enforced on resume via HELIOS_FORCE_LR=1
-  lr_scheduler: "constant_with_warmup"   # resume step 17000 >> warmup 500 -> effectively constant 1e-5
+  learning_rate: 1e-5
+  lr_scheduler: "constant_with_warmup"
   lr_warmup_steps: 500
   optimizer: "adamw"
   adam_beta1: 0.9
@@ -141,7 +139,7 @@ training_config:
   latent_window_size:
     - 9
   is_random_drop: true
-  random_drop_i2v_ratio: 0.1    # RECIPE: train the I2V format (issue #38); effective ~6% given t2v 0.4
+  random_drop_i2v_ratio: 0.1
   random_drop_v2v_ratio: 0.4
   random_drop_t2v_ratio: 0.4
   #
@@ -155,8 +153,8 @@ training_config:
   downsample_min_corrupt_ratio_model_input: 0.9
   downsample_max_corrupt_ratio_model_input: 1.0
   corrupt_history: true
-  corrupt_mode_history: "random"        # RECIPE: was "noise"; enables Blur (downsample) branch
-  corrupt_mode_prob_history: 0.8889     # P(noise)=0.9*0.8889~=0.8, P(blur)~=0.1, P(clean)=0.1
+  corrupt_mode_history: "random"
+  corrupt_mode_prob_history: 0.8889
   is_frame_independent_corrupt_history: true
   is_chunk_independent_corrupt_history: false
   noise_corrupt_ratio_history_short: 0.33333333333333
@@ -165,7 +163,6 @@ training_config:
   noise_corrupt_clean_prob_history: 0.1
   downsample_min_corrupt_ratio_history: 0.9
   downsample_max_corrupt_ratio_history: 1.0
-  # ---- RECIPE: Easy Anti-Drifting Saturation (needs the prepare_stage1_noise_input patch) ----
   is_add_saturation: true
   saturation_ratio_clean_prob: 0.1
   saturation_ratio_min: 0.3
@@ -185,7 +182,7 @@ training_config:
   is_train_restrict_lora: false
   restrict_lora: false
   restrict_lora_rank: 128
-  # ---- Evolving Memory ----
+  # ---- Evolving Memory (SMOKE: write every step) ----
   is_enable_evolving_memory: true
   memory_num_query_frames: 3
   memory_enc_num_layers: 2
@@ -196,6 +193,6 @@ training_config:
   memory_learning_rate: 5.0e-5
   memory_bptt_sections: 1
   memory_write_source: "t0_hidden"
-  memory_single_write_prob: 0.5
+  memory_single_write_prob: 1.0
   memory_tf_unroll: false
   memory_unroll_sections: 1

@@ -51,9 +51,18 @@ class TestStageAConfig(unittest.TestCase):
         self.assertEqual(tc.memory_unroll_sections, 1)
         self.assertEqual(tc.memory_bptt_sections, 1)
 
-    def test_stage_a_runs_about_four_thousand_steps_from_frozen_checkpoint(self):
-        self.assertEqual(self.config.training_config.max_train_steps - 19500, 4000)
+    def test_stage_a_is_a_fresh_run_on_the_merged_base(self):
+        # Stage A cannot fork by checkpoint-resume: its trainable set (memory
+        # only) differs from the ancestor's, so accelerate load_state would
+        # crash on the optimizer state. The fork is a MERGED base
+        # (transformer_model_name_or_path) + fresh 4000-step run from
+        # global_step 0; resume "latest" is crash-resume within this run only.
+        self.assertEqual(self.config.training_config.max_train_steps, 4000)
         self.assertEqual(self.config.training_config.resume_from_checkpoint, "latest")
+        self.assertIn("_merged", self.config.model_config.transformer_model_name_or_path)
+        self.assertEqual(self.config.model_config.subfolder, "transformer")
+        # Run artifacts belong to THIS fork's owner, not the ancestor's tree.
+        self.assertTrue(str(self.config.output_dir).startswith("/mnt/beegfs/siyuan/"))
 
     def test_evolving_memory_validation_passes(self):
         validate_evolving_memory_config(
