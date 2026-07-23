@@ -159,46 +159,57 @@ class BucketedFeatureDataset(Dataset):
         self._epoch = epoch
 
     @staticmethod
-    def _compute_eviction(continue_source_latent, choice_idx, latent_window_size, history_window_size):
-        """Eviction slices for the memory write path (design ch.2 D4).
+    def _compute_eviction(
+        evicted_timeline, history_timeline, choice_idx, latent_window_size, history_window_size
+    ):
+        """Eviction slices for the memory write path (design ch.2 D4/D5).
 
         Advancing the target section from k-1 to k rolls the oldest
         latent_window_size frames out of section (k-1)'s history window:
-        continue_source_latent[:, W*(k-1) : W*k) with W=latent_window_size.
-        Because the timeline is [history_window_size zeros] + real frames,
-        the number of REAL frames among the evicted ones is
+        timeline[:, W*(k-1) : W*k) with W=latent_window_size. Because both
+        timelines are [history_window_size zeros] + real frames, the number
+        of REAL frames among the evicted ones is
         min(W, max(0, W*k - history_window_size)) — the single source of
         truth for whether/how much to write (never hardcode k boundaries).
 
-        Returns (evicted_latent [C,W,H,W'], evicted_history [C,Hw,H,W'],
+        Two timelines because the two slices play different roles in the D5
+        write forward: the evicted frames are its X_Noisy and must be at the
+        SAMPLE'S OWN bucket resolution (evicted_timeline = continue_vae_latent),
+        while the preceding history conditions the forward exactly like the
+        normal training history path, which uses the full-res source timeline
+        (history_timeline = continue_source_latent). For full-res samples the
+        two timelines are the same tensor.
+
+        Returns (evicted_latent [C,W,h,w], evicted_history [C,Hw,H,W'],
         evicted_valid_frames int). evicted_history is the Hw-frame slice
         preceding the evicted block, left-padded with zeros on underflow.
         choice_idx == 0 has no predecessor section: all-zero tensors, 0 valid.
         """
-        channels, _, height, width = continue_source_latent.shape
+        ev_channels, _, ev_height, ev_width = evicted_timeline.shape
+        hist_channels, _, hist_height, hist_width = history_timeline.shape
         evicted_start = (choice_idx - 1) * latent_window_size
         evicted_valid_frames = int(
             min(latent_window_size, max(0, choice_idx * latent_window_size - history_window_size))
         )
 
         if choice_idx <= 0:
-            evicted_latent = continue_source_latent.new_zeros(
-                channels, latent_window_size, height, width
+            evicted_latent = evicted_timeline.new_zeros(
+                ev_channels, latent_window_size, ev_height, ev_width
             )
-            evicted_history = continue_source_latent.new_zeros(
-                channels, history_window_size, height, width
+            evicted_history = history_timeline.new_zeros(
+                hist_channels, history_window_size, hist_height, hist_width
             )
             return evicted_latent, evicted_history, evicted_valid_frames
 
-        evicted_latent = continue_source_latent[
+        evicted_latent = evicted_timeline[
             :, evicted_start : evicted_start + latent_window_size
         ].clone()
 
         hist_start = evicted_start - history_window_size
         pad = max(0, -hist_start)
-        real_history = continue_source_latent[:, max(0, hist_start) : evicted_start]
+        real_history = history_timeline[:, max(0, hist_start) : evicted_start]
         if pad > 0:
-            zero_pad = continue_source_latent.new_zeros(channels, pad, height, width)
+            zero_pad = history_timeline.new_zeros(hist_channels, pad, hist_height, hist_width)
             evicted_history = torch.cat([zero_pad, real_history], dim=1)
         else:
             evicted_history = real_history.clone()
@@ -272,6 +283,7 @@ class BucketedFeatureDataset(Dataset):
         eviction = None
         if self.return_evicted_latent:
             eviction = self._compute_eviction(
+                continue_vae_latent,
                 continue_source_latent,
                 choice_idx,
                 latent_window_size=latent_window_size,

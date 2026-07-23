@@ -35,7 +35,7 @@ class DatasetEvictionTest(unittest.TestCase):
         for choice_idx in range(5):
             with self.subTest(choice_idx=choice_idx):
                 evicted, history, valid_frames = BucketedFeatureDataset._compute_eviction(
-                    timeline, choice_idx, latent_window_size=9, history_window_size=19
+                    timeline, timeline, choice_idx, latent_window_size=9, history_window_size=19
                 )
                 self.assertEqual(evicted.shape, (2, 9, 2, 3))
                 self.assertEqual(history.shape, (2, 19, 2, 3))
@@ -47,11 +47,31 @@ class DatasetEvictionTest(unittest.TestCase):
         timeline = torch.arange(1, 1 + 2 * 50, dtype=torch.float32).view(2, 50, 1, 1)
 
         _, history, _ = BucketedFeatureDataset._compute_eviction(
-            timeline, 3, latent_window_size=9, history_window_size=19
+            timeline, timeline, 3, latent_window_size=9, history_window_size=19
         )
 
         self.assertEqual(history[:, :1].tolist(), torch.zeros(2, 1, 1, 1).tolist())
         self.assertTrue(torch.equal(history[:, 1:], timeline[:, :18]))
+
+    def test_mixed_resolution_roles(self):
+        # Low-res bucket samples condition on a FULL-res source timeline while the
+        # write forward's X_Noisy must be at the sample's own bucket resolution
+        # (adversarial-review finding on 7f422b6): evicted comes from the bucket
+        # timeline, history from the source timeline.
+        bucket_timeline = self._make_timeline(height=2, width=3)
+        source_timeline = self._make_timeline(height=8, width=12)
+
+        for choice_idx in (0, 3, 4):
+            with self.subTest(choice_idx=choice_idx):
+                evicted, history, _ = BucketedFeatureDataset._compute_eviction(
+                    bucket_timeline,
+                    source_timeline,
+                    choice_idx,
+                    latent_window_size=9,
+                    history_window_size=19,
+                )
+                self.assertEqual(evicted.shape, (2, 9, 2, 3))
+                self.assertEqual(history.shape, (2, 19, 8, 12))
 
     def test_flag_defaults_false_and_collate_handles_eviction_fields(self):
         parameter = inspect.signature(BucketedFeatureDataset.__init__).parameters["return_evicted_latent"]
