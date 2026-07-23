@@ -55,7 +55,11 @@ class MemorySingleWriteTest(unittest.TestCase):
         self.assertTrue(torch.allclose(state[0].detach(), m0[0]))
         self.assertFalse(torch.allclose(state[1].detach(), m0[1]))
 
-    def test_all_zero_validity_is_a_no_op(self):
+    def test_all_zero_validity_is_a_state_no_op(self):
+        # The forward still RUNS (DDP rank symmetry — review blocker on the
+        # original early return: skipping the wrapped forward on one rank
+        # desynchronizes the buffer-broadcast collectives); only the state
+        # outcome is a no-op via the blend.
         model = make_model(with_memory=True)
         mem = model.evolving_memory
         mem.reset(B, device=DEVICE)

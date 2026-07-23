@@ -73,7 +73,7 @@ File: `train_helios.py` + `helios/utils/utils_helios_base.py` (current `_flow_lo
 
 1. CPU unit suite green (Tasks 1-4 tests + existing 39).
 2. Adversarial refute-review of the diff against real call sites (stewardship C) — before any GPU time.
-3. 1-node GPU smoke profile: bs2, U=4, memory on — peak memory + s/it (design's bs4 single-section ~90 GiB anchor makes bs2×U=4 on H200 141 GB an UNTESTED assumption; this smoke revises the ch.2 §8 cost multipliers).
+3. 1-node GPU smoke profile: bs2, U=4, memory on — peak memory + s/it (design's bs4 single-section ~90 GiB anchor makes bs2×U=4 on H200 141 GB an UNTESTED assumption; this smoke revises the ch.2 §8 cost multipliers). MUST run multi-GPU (≥2) DDP and include steps where ranks hold mixed all-zero/valid eviction batches — the 3b review's blocking finding was a rank-desynchronized collective (fixed by rank-symmetric write participation: deterministic per-step coin + no local forward skip); the smoke proves the fix. find_unused_parameters was REFUTED as a failure mode (DDP traverses through the memory_tokens input edge; 2-rank repro confirmed gradients arrive).
 4. Only after 1-3: Stage A launch decision (user-facing — cluster-scale training is not started autonomously).
 
 ## Execution routing

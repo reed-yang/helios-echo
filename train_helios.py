@@ -1570,9 +1570,17 @@ def main(args):
                     ):
                         memory_module = accelerator.unwrap_model(transformer).evolving_memory
                         memory_module.reset(prompt_embeds.shape[0], device=accelerator.device)
+                        # The write coin must be RANK-SYMMETRIC: the write forward
+                        # is a DDP collective (broadcast_buffers), so per-rank RNG
+                        # would desynchronize ranks. Derive it deterministically
+                        # from (seed, global_step) — identical on every rank and
+                        # stable across resume.
+                        write_coin = torch.rand(
+                            (), generator=torch.Generator().manual_seed(args.seed * 1000003 + global_step)
+                        ).item()
                         if (
                             memory_write_batch is not None
-                            and float(torch.rand(())) < args.training_config.memory_single_write_prob
+                            and write_coin < args.training_config.memory_single_write_prob
                         ):
                             _memory_single_write(
                                 transformer=transformer,

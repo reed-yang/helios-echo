@@ -63,5 +63,8 @@
 - D4 审查 blocking（已修 e064ad9）：低分辨率桶驱逐帧曾取全分辨率 source timeline，而写前向的 X_Noisy 必须随桶分辨率；修为双 timeline 角色分离。审查同时确认：既有 history 路径本就是 full-res 条件契约（有意的混合分辨率训练）。
 - D6 审查 minor（已修）：非事件样本 U=4 rollout 有 ~98.4% 概率中途切换 caption 版本（逐 section 独立全局随机抽）→ 裁决为一次 rollout 只抽一次并复用；事件样本逐 chunk 映射不变。
 - D6 审查证实项：torch.randint 首抽与旧行为逐位等价（Torch 2.10 实测）；`num_frame` 文件名字段确为 RGB 帧数、`//33` 与离线 chunk 数一致；filter 后 bucket 重建无 stale-index。
+- Task 3a 审查：CLEAN（逐语句等价核对；memory_tokens=None 与缺省同路径；唯一调用点关键字调用不受损）。
+- Task 3b 审查 blocking（已修）：单写 helper 的全零 early-return 是逐 rank 本地决策——多卡下 rank 间 wrapped-forward 次数不一致 ⇒ buffer-broadcast collective 错位 ⇒ 训练卡死，单卡测试不可见。修复双管齐下：写掷币改为 (seed, global_step) 确定性导出（全 rank 一致 + resume 稳定）；early-return 移除（写步全 rank 跑捕获前向，全零 batch 由 blend 丢弃）。**smoke 门升级：必须 ≥2 卡 DDP 且覆盖 rank 间混合全零/有效驱逐批次。**
+- Task 3b 审查反驳项（重要排险）：`find_unused_parameters=True` 与图外 update **不是**失败模式——DDP 自 forward 输出反向遍历会沿 `memory_tokens` 输入边继续到 Enc/query_init 上游（审查 worker 2-rank 最小复现确认梯度可达）；D4 mask 方向、capture 契约、blend dtype/device、trainer 作用域、逐 micro-step reset 语义均核对通过。
 
 - **rollout 冒烟 run2（终局）：8/8 ALL PASS**（job 5552, c-node06, ~48 min）——修正采样配置后双臂 latents 均有限，NaN 根因判定实锤；状态机与 run1 逐项一致；开销 +5.5%、峰值 43.3 GiB；σ_last=0.122≠0 实测确认 FiLM(σ_last) 写条件化为必要设计（呼应总纲 §二 σ_last 偏差项）。verdict: `logs/research/rollout-smoke-verdict-run2.md`。**管线状态机 GPU 门全绿，M1 训练链四批次（模块/transformer/trainer/管线）全部收口。**

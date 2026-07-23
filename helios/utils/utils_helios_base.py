@@ -256,13 +256,21 @@ def _memory_single_write(
     transformer may be accelerator-wrapped (forward goes through the
     wrapper); memory_module must be the UNWRAPPED evolving_memory.
     Returns the number of samples actually written.
+
+    DDP rank symmetry (review blocker on the original early return): an
+    all-zero-validity batch must NOT skip the wrapped forward — with
+    broadcast_buffers=True every wrapped forward is a collective, so a
+    local skip desynchronizes ranks whose batches happen to differ and
+    the job hangs. On a write step every rank runs the capture forward;
+    an all-zero batch just blends everything back (one wasted no_grad
+    forward, bounded by memory_single_write_prob). The CALLER's decision
+    to invoke this helper must itself be rank-symmetric (deterministic
+    per-step coin, not per-rank RNG).
     """
     assert memory_module.query_state is not None, "call reset() before the write"
     valid = torch.as_tensor(
         [int(v) for v in evicted_valid_frames], dtype=torch.long, device=device
     )
-    if not bool((valid > 0).any()):
-        return 0
 
     (
         write_input,
