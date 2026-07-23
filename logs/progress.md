@@ -89,4 +89,6 @@
 - [x] Task 3b：单写模拟 helper `_memory_single_write` + trainer 接线 — commit e36d659（no_grad t=0 捕获前向 + 图内门控 update；批级写决策+样本级 blend+token 级 mask 全兑现）
 - [x] 3a/3b 对抗审查闭环 — commit 48132c1：3a 等价性 CLEAN；3b 抓到 blocking=全零 early-return 逐 rank 决策致多卡 collective 错位卡死（修：确定性掷币 + 写步全 rank 跑前向）；审查同时反驳了 find_unused_parameters 担忧（DDP 沿输入边遍历，2-rank 复现梯度可达）
 - 测试面：全套 64 绿
-- 待做：Task 5 配置分叉（Sol worker 实现中）→ ≥2 卡 DDP smoke profile（必须覆盖 rank 间混合全零/有效驱逐；启动真训练需用户拍板）→ 3c U-展开循环（Stage B 期）；P2 Task 0 配方映射 GPU dry-run 可交错
+- [x] Task 5 配置分叉 `stage1_lora_mem368_A.yaml` — commit f843df8（Sol worker；程序化逐键 diff 恰 16 字段变更；13 个 memory 字段全显式；worker 抓到 max_train_steps 绝对语义 23500=19500+4000，主 agent 独立核验 train_helios.py:1154 确认）
+- 测试面：全套 69 绿。**Stage A 实现面（Task 1-5）全部完成并经对抗审查。**
+- 待做（训练前验证梯子，依次）：② 单卡真权重微型训练 smoke（3-5 步真 trainer 路径：接线/dtype/显存/loss 有限/可训练集断言/fork 机制——祖先 checkpoint 须置入新 output_dir 供 resume latest 发现/真数据 evicted 字段健诊/FORCE_LR resume 测试）→ ③ ≥2 卡 DDP smoke（混合全零/有效驱逐 rank + 显存/速度实测修订 §8 预算）→ ④ 用户拍板 Stage A 真训练（4k 步）。3c U-展开（Stage B）与 P2 Task 0 可交错。
