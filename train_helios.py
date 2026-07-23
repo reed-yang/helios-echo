@@ -2771,6 +2771,14 @@ if __name__ == "__main__":
                 raise ValueError(f"Duplicate dataset name: {basename}")
             basenames.append(basename)
 
+    if conf.data_config.single_res and not conf.data_config.use_stage1_dataset:
+        # The dmd/mp4 datasets still use the legacy cache that does not record
+        # filter parameters; only the stage-1 dataset has the config-independent
+        # dataset_cache_v2.pkl, so the rebuild guard stays for the others.
+        assert conf.data_config.force_rebuild, (
+            "force_rebuild must be True when single_res is enabled (non-stage1 datasets)"
+        )
+
     # ---------------------- For Wan ----------------------
     validate_evolving_memory_config(conf.training_config, conf.data_config, conf.validation_config)
 

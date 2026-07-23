@@ -108,6 +108,24 @@ class BucketedFeatureDataset(Dataset):
                 for sample_idx, sample_info in enumerate(self.samples):
                     self.buckets[sample_info["bucket_key"]].append(sample_idx)
 
+    @staticmethod
+    def _validate_cache_payload(candidate):
+        """True iff the deserialized object is a structurally sound v2 payload.
+
+        A torn concurrent write can produce bytes that unpickle into ANYTHING
+        (or raise any exception class), so acceptance must be structural, not
+        just schema-tagged (adversarial-review finding on be8ce09).
+        """
+        if not isinstance(candidate, dict) or candidate.get("schema") != 2:
+            return False
+        samples = candidate.get("samples")
+        buckets = candidate.get("buckets")
+        if not isinstance(samples, list) or not isinstance(buckets, dict):
+            return False
+        if samples and not isinstance(samples[0], dict):
+            return False
+        return all(isinstance(indices, list) for indices in buckets.values())
+
     def _process_folder(self, folder, cache_file):
         cached_data = None
         if not self.force_rebuild and os.path.exists(cache_file):
@@ -115,9 +133,12 @@ class BucketedFeatureDataset(Dataset):
             try:
                 with open(cache_file, "rb") as f:
                     candidate = pickle.load(f)
-            except (OSError, pickle.UnpicklingError, EOFError):
+            except Exception:
+                # A torn/corrupt pickle can raise far more than UnpicklingError
+                # (EOFError, UnicodeDecodeError, AttributeError, MemoryError...).
+                # Any load failure means "rebuild", never "crash the launch".
                 candidate = None
-            if isinstance(candidate, dict) and candidate.get("schema") == 2:
+            if self._validate_cache_payload(candidate):
                 cached_data = candidate
 
         if cached_data is None:
@@ -125,11 +146,24 @@ class BucketedFeatureDataset(Dataset):
             folder_samples, folder_buckets = self._build_folder_metadata(folder)
             cached_data = {"schema": 2, "samples": folder_samples, "buckets": folder_buckets}
             if not self.force_rebuild:
-                # First-build coordination across ranks is intentionally deferred to
-                # a later trainer-side rank-0/barrier improvement.
+                # Atomic publish: concurrent first builds (one per rank) must never
+                # let a reader see a half-written file or a dying writer leave a
+                # truncated one — write a per-writer tmp file, then os.replace.
+                # First-build coordination (rank-0/barrier to avoid N parallel
+                # scans) is deferred to a trainer-side improvement; save failure
+                # (e.g. read-only shared corpus dir) degrades to in-memory only.
                 print(f"Saving metadata cache for folder: {folder}")
-                with open(cache_file, "wb") as f:
-                    pickle.dump(cached_data, f)
+                tmp_file = f"{cache_file}.tmp.{os.getpid()}"
+                try:
+                    with open(tmp_file, "wb") as f:
+                        pickle.dump(cached_data, f)
+                    os.replace(tmp_file, cache_file)
+                except OSError as exc:
+                    print(f"Cache save skipped ({exc}); continuing with in-memory metadata")
+                    try:
+                        os.remove(tmp_file)
+                    except OSError:
+                        pass
             print(f"Cached {len(folder_samples)} samples from {folder}\n")
         else:
             folder_samples = cached_data["samples"]

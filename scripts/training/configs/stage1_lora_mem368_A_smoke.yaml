@@ -27,9 +27,9 @@ data_config:
   use_shuffle: true
   pin_memory: true
   persistent_workers: true
-  force_rebuild: true           # trainer invariant: single_res REQUIRES force_rebuild
-                                # (train_helios.py:2766); rebuild does not write the
-                                # shared cache, it just re-scans (~388k filenames)
+  force_rebuild: false          # v2 metadata cache is config-independent; the old
+                                # single_res+force_rebuild invariant now applies only
+                                # to non-stage1 datasets
   single_res: true
   single_height: 368
   single_width: 640

@@ -14,7 +14,9 @@ data_config:
   use_shuffle: true
   pin_memory: true
   persistent_workers: true
-  force_rebuild: true
+  force_rebuild: false          # v2 metadata cache (dataset_cache_v2.pkl) is
+                                # config-independent; true would bypass it and
+                                # re-scan ~388k files per rank per launch
   single_res: true
   single_height: 368
   single_width: 640

@@ -170,5 +170,82 @@ class DatasetCacheV2Test(unittest.TestCase):
             self.assertEqual(all_indices, list(range(len(dataset.samples))))
 
 
+class DatasetCacheV2HardeningTest(unittest.TestCase):
+    """Review follow-ups on be8ce09: torn-write self-heal breadth, structural
+    validation, atomic publish, and read-only-dir tolerance."""
+
+    FILENAMES = DatasetCacheV2Test.FILENAMES
+
+    def _folder_with_files(self, folder):
+        DatasetCacheV2Test._create_empty_feature_files(folder, self.FILENAMES)
+
+    def test_exotic_corrupt_payloads_are_rebuilt_not_raised(self):
+        # A torn concurrent write can unpickle into raises far beyond
+        # UnpicklingError. Each corrupt variant must trigger a silent rebuild.
+        corrupt_variants = {
+            # protocol-0 garbage that raises UnicodeDecodeError inside load
+            "unicode": b"(V\xff\xfe\x00.",
+            # references a nonexistent attribute -> AttributeError
+            "attribute": b"cos\nnope_this_does_not_exist\n.",
+            # valid pickle, dict with schema 2 but missing keys
+            "missing_keys": pickle.dumps({"schema": 2}),
+            # valid pickle, schema 2 but wrong value types
+            "wrong_types": pickle.dumps({"schema": 2, "samples": "oops", "buckets": []}),
+            # bucket values not lists
+            "bad_buckets": pickle.dumps(
+                {"schema": 2, "samples": [], "buckets": {"k": "not-a-list"}}
+            ),
+        }
+        for name, payload in corrupt_variants.items():
+            with self.subTest(variant=name):
+                with tempfile.TemporaryDirectory() as folder:
+                    self._folder_with_files(folder)
+                    v2_path = os.path.join(folder, "dataset_cache_v2.pkl")
+                    with open(v2_path, "wb") as cache_file:
+                        cache_file.write(payload)
+
+                    dataset = BucketedFeatureDataset([folder])
+
+                    self.assertEqual(len(dataset), 4)
+                    with open(v2_path, "rb") as cache_file:
+                        healed = pickle.load(cache_file)
+                    self.assertEqual(healed["schema"], 2)
+
+    def test_readonly_folder_degrades_to_in_memory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._folder_with_files(folder)
+            os.chmod(folder, 0o555)
+            try:
+                dataset = BucketedFeatureDataset([folder])
+                self.assertEqual(len(dataset), 4)
+                self.assertFalse(os.path.exists(os.path.join(folder, "dataset_cache_v2.pkl")))
+                # No stray tmp files left behind either.
+                leftovers = [f for f in os.listdir(folder) if ".tmp." in f]
+                self.assertEqual(leftovers, [])
+            finally:
+                os.chmod(folder, 0o755)
+
+    def test_cache_publish_is_atomic_via_replace(self):
+        # The published file must appear via os.replace of a tmp file, never a
+        # direct truncating open of the final path.
+        with tempfile.TemporaryDirectory() as folder:
+            self._folder_with_files(folder)
+            replaced = []
+            real_replace = os.replace
+
+            def spy_replace(src, dst):
+                replaced.append((src, dst))
+                return real_replace(src, dst)
+
+            with mock.patch("os.replace", side_effect=spy_replace):
+                BucketedFeatureDataset([folder])
+
+            v2_path = os.path.join(folder, "dataset_cache_v2.pkl")
+            self.assertTrue(os.path.exists(v2_path))
+            self.assertEqual(len(replaced), 1)
+            self.assertIn(".tmp.", replaced[0][0])
+            self.assertEqual(replaced[0][1], v2_path)
+
+
 if __name__ == "__main__":
     unittest.main()
