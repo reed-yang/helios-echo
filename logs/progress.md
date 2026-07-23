@@ -75,3 +75,12 @@
 - [x] D13 断言补差 + 加固（commit fe1d7a5 → 7618eb7）：stage1 蕴含 / dataset XOR one-hot / kv-cache 互斥；对抗审查抓到 validation_config 可选默认的静默跳过漏洞，改为必需参数 + TypeError 测试；config 套件 11 项、全套 46 绿
 - [x] ultracode 工作流（wf_de941cfd-8ce，4 agent）：三工作流并行 produce→verify，两个真实缺陷（motion 不可比、可选参数漏洞）在进 GPU 验证前被独立对抗视角抓到（兑现 stewardship 纪律 C）
 - 待做（顺序）：Stage A Task 1-3 主刀实现（D4 驱逐切片 / D6 展开参数 / D7 section 级 loss 原语，证据卡片已备）→ 对抗审查 → 1 节点 smoke profile；P2 Task 0 配方映射 GPU dry-run 可交错
+
+## 2026-07-23 凌晨（Stage A Task 1/2 落地批次）
+
+- [x] Task 1 / D4 驱逐切片 — commit 7f422b6（TDD：红灯测试先于实现；纯静态 helper `_compute_eviction`；k∈0..4 手算序列全验证；默认关闭路径含 RNG 状态逐位纯净）
+- [x] D4 对抗审查抓到 blocking：低分辨率桶的驱逐帧取自全分辨率 source timeline，而 D5 中驱逐帧是写前向的 X_Noisy、必须随桶分辨率——修为双 timeline 角色分离（X_Noisy=桶 `continue_vae_latent`，history=全分辨率 source，与既有 history 条件契约一致）— commit e064ad9；其余审查角度全 CLEAN
+- [x] Task 2 / D6 展开参数 — commit 3729bed（start_section_idx 并入逐样本 seeded 流并返回，修 F3；首抽与旧行为逐位等价有 parity 测试；`return_rollout_metadata` 门控 start+逐 section prompts；载入后内存过滤 sections=num_frame//33——有意偏离设计的"cache 按 U 失效"：共享数据目录的 cache 会被不校验的旧读者误载，改为不写 U 特化 cache；trainer 接线三 flag）
+- [x] Task 3 实现决策预先固化（计划文档 Task 3 节）：批级写决策+样本级 blend、token 级 mask 展开、TF 写 σ_last=0、驱逐分辨率角色
+- 在飞：D6 对抗审查（Sol）；trainer batch-prep 证据抽取（Terra → read-trainer-batch-prep-anchors.md，Task 3 最后一块未知）
+- 测试面：全套 56 绿（eviction 4 + unroll 6 新增）

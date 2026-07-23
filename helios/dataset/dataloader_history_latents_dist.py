@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import pickle
 import random
@@ -42,7 +43,14 @@ class BucketedFeatureDataset(Dataset):
         assert self.is_keep_x0, "is_keep_x0 need to be True now!"
 
         self.base_seed = seed
-        self._epoch = 0
+        # Shared-memory epoch: persistent DataLoader workers hold forked dataset
+        # copies, so a plain-int epoch set by the main process after worker
+        # creation never reaches them (verified against StatefulDataLoader) and
+        # every per-(seed, epoch, idx) draw silently collapses to the creation-
+        # time epoch. A multiprocessing.Value is inherited by fork-started
+        # workers, so set_epoch stays live. Under spawn-pickling __getstate__
+        # degrades it to a frozen int (status quo ante, no worse).
+        self._epoch_shared = multiprocessing.Value("i", 0)
 
         if isinstance(feature_folders, str):
             self.feature_folders = [feature_folders]
@@ -154,6 +162,28 @@ class BucketedFeatureDataset(Dataset):
             sample_idx += 1
 
         return samples, buckets
+
+    @property
+    def _epoch(self):
+        shared = getattr(self, "_epoch_shared", 0)
+        return shared.value if hasattr(shared, "value") else int(shared)
+
+    @_epoch.setter
+    def _epoch(self, epoch):
+        shared = getattr(self, "_epoch_shared", None)
+        if hasattr(shared, "value"):
+            shared.value = int(epoch)
+        else:
+            self._epoch_shared = multiprocessing.Value("i", int(epoch))
+
+    def __getstate__(self):
+        # multiprocessing.Value cannot be pickled (spawn-started workers);
+        # degrade to a frozen int — identical to the old plain-int behavior.
+        state = self.__dict__.copy()
+        shared = state.get("_epoch_shared")
+        if hasattr(shared, "value"):
+            state["_epoch_shared"] = shared.value
+        return state
 
     def set_epoch(self, epoch):
         self._epoch = epoch
@@ -388,14 +418,16 @@ class BucketedFeatureDataset(Dataset):
             feature_data["prompt_raws"] = [sidecar["prompt_raw"]]
         return feature_data
 
-    def _pick_prompt_embed(self, feature_data, choice_idx=None):
+    def _pick_prompt_embed(self, feature_data, choice_idx=None, caption_version=None):
         """Select the prompt embed for the sampled target chunk.
 
         Multi-event (prompt-switching) data stores one embed per event plus a
         chunk->event map; we return the embed of the event that owns the chunk at
         ``choice_idx``. This is what teaches Helios to switch prompts at chunk
         boundaries (the transformer/forward/loss are unchanged). Falls back to the
-        single-prompt caption-mixing path for ordinary Stage-1 .pt files.
+        single-prompt caption-mixing path for ordinary Stage-1 .pt files;
+        ``caption_version`` pins the fallback to one version (rollout consumers
+        pass it so a multi-section unroll does not switch captions mid-rollout).
         """
         if (
             choice_idx is not None
@@ -408,7 +440,9 @@ class BucketedFeatureDataset(Dataset):
         # uniformly pick one rewritten caption version if available; else legacy embed.
         available = [v for v in self.caption_versions if f"prompt_embed_{v}" in feature_data]
         if available:
-            return feature_data[f"prompt_embed_{random.choice(available)}"]
+            if caption_version not in available:
+                caption_version = random.choice(available)
+            return feature_data[f"prompt_embed_{caption_version}"]
         return feature_data["prompt_embed"]
 
     def __getitem__(self, idx):
@@ -511,8 +545,23 @@ class BucketedFeatureDataset(Dataset):
                 "return_rollout_metadata requires return_all_vae_latent"
             )
             output_dict["start_section_idx"] = start_section_idx
+            # Draw the non-event caption version ONCE per rollout: per-section
+            # independent draws switch captions mid-rollout with probability
+            # 1 - (1/V)^(U-1) (~98% at V=4, U=4), injecting text-conditioning
+            # churn into the exact loss that trains temporal continuity.
+            # Event samples are unaffected (per-chunk event mapping wins).
+            available_versions = [
+                v for v in self.caption_versions if f"prompt_embed_{v}" in feature_data
+            ]
+            rollout_caption_version = (
+                random.choice(available_versions) if available_versions else None
+            )
             output_dict["section_prompt_embeds"] = [
-                self._pick_prompt_embed(feature_data, start_section_idx + u)
+                self._pick_prompt_embed(
+                    feature_data,
+                    start_section_idx + u,
+                    caption_version=rollout_caption_version,
+                )
                 for u in range(self.num_rollout_sections)
             ]
 

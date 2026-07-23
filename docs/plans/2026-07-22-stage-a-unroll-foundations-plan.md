@@ -29,6 +29,25 @@ File: the stage1 dataset in `helios/utils/` (dataloader cited as `dataloader:` i
 
 ## Task 3 — Section-level loss primitive + unroll loop (D7)
 
+> Implementation decisions fixed after Task 1/2 landed (recorded pre-implementation):
+> 1. **Per-sample write blending, batch-level write decision.** memory_single_write_prob
+>    decides write-vs-static per BATCH; within a write batch, samples with
+>    evicted_valid_frames==0 keep their prior state via a post-update blend
+>    (save old query_state -> update() on the full batch -> torch.where(write_mask)
+>    restore). valid==0 samples get a dummy all-True frame mask (their evicted
+>    frames are zeros; the blend discards the result) so the module's
+>    all-masked assert stays intact. No module changes.
+> 2. **Token-level mask expansion.** frame_mask marks the LAST
+>    evicted_valid_frames × tokens_per_frame tokens valid (zero-prefix frames
+>    come first temporally); tokens_per_frame = E // 9 from the captured hidden.
+> 3. **TF write sigma.** The Stage A/B write forward runs at timestep 0 on
+>    clean evicted latents -> sigma_last = 0.0 for FiLM (inference-time writes
+>    see sigma_last≈0.12-0.5; Stage C closes that gap per D9).
+> 4. **Eviction resolution roles** (review blocker fix e064ad9): X_Noisy =
+>    bucket-res evicted_latents; conditioning = full-res evicted_history_latents,
+>    split into tiers with the SAME construction the trainer uses for the main
+>    forward (evidence: logs/research/read-trainer-batch-prep-anchors.md).
+
 File: `train_helios.py` + `helios/utils/utils_helios_base.py` (current `_flow_loss` backwards internally at :107).
 
 - Refactor: extract a section-level primitive that **returns** the scalar loss (no internal backward); the outer `accelerator.accumulate` scope (train_helios.py:1484-1486) keeps ownership of sync boundaries.

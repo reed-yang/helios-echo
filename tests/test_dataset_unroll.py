@@ -85,6 +85,35 @@ class SeededStartTest(unittest.TestCase):
         self.assertIsNone(eviction)
 
 
+class SharedEpochTest(unittest.TestCase):
+    def test_set_epoch_reaches_reads_and_survives_pickle(self):
+        # Adversarial-review major on 3729bed: a plain-int _epoch set by the main
+        # process never reaches persistent fork-started DataLoader workers. The
+        # shared-memory epoch keeps set_epoch live under fork inheritance; under
+        # spawn pickling it degrades to a frozen int (status quo ante).
+        ds = make_dataset_stub(return_all_vae_latent=True, num_rollout_sections=2)
+        ds.set_epoch(7)
+        self.assertEqual(ds._epoch, 7)
+
+        clone = pickle.loads(pickle.dumps(ds))
+        self.assertEqual(clone._epoch, 7)
+        clone.set_epoch(9)  # setter must still work on the degraded copy
+        self.assertEqual(clone._epoch, 9)
+        self.assertEqual(ds._epoch, 7)  # the original is untouched
+
+    def test_epoch_changes_the_sample_stream(self):
+        ds = make_dataset_stub(return_all_vae_latent=True, num_rollout_sections=2)
+        latent = synthetic_vae_latent()
+        draws = set()
+        for epoch in range(6):
+            ds.set_epoch(epoch)
+            out = ds.prepare_stage1_latent(latent, idx=5)
+            draws.add((out[4], out[5]))
+        # Six epochs over 6 sections must produce more than one distinct
+        # (choice_idx, start_section_idx) pair if the epoch reaches the stream.
+        self.assertGreater(len(draws), 1)
+
+
 class RolloutFilterTest(unittest.TestCase):
     def _folder_with_cache(self, tmpdir, frames_list):
         samples = []

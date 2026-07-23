@@ -57,4 +57,11 @@
 
 - P1-B 臂（Helios-Base 直载）13/13 PASS；P1-A1 臂（transformer_init + lora368@19500 + partial 装配）9/9 PASS → 生产加载与训练谱系装配两条路径均与 memory 模块兼容，off-path 等价在真权重成立。
 - rollout 冒烟 run1：状态机全对（3 写/队列[3,4]/逐条目σ），开销 +5.6%（验收线 12%），NaN 根因 = 冒烟自身调用偏离验证采样配置（8步+固定mu=1+空负提示），产品代码无缺陷（Sol worker 对照 log_validation/infer 双基准 + diff 复核）。
+## 实现期对抗审查发现（2026-07-23，Stage A Task 1/2 批次）
+
+- **上游既有缺陷（值得同步主线）**：stage-1 dataset 的 `_epoch` 是普通 int，persistent DataLoader workers（谱系配置 8 workers）持 fork 副本，主进程 `set_epoch` 永不到达——`choice_idx` 的逐样本 seeded 流跨 epoch 塌缩为创建时 epoch 的固定值（审查 worker 用 StatefulDataLoader 实测复现；影响 xiangbo 现行训练的跨 epoch 数据增广）。本 fork 修复：epoch 放 `multiprocessing.Value`（fork 继承下 set_epoch 实时可见，spawn pickling 降级为冻结 int 不劣于现状）。
+- D4 审查 blocking（已修 e064ad9）：低分辨率桶驱逐帧曾取全分辨率 source timeline，而写前向的 X_Noisy 必须随桶分辨率；修为双 timeline 角色分离。审查同时确认：既有 history 路径本就是 full-res 条件契约（有意的混合分辨率训练）。
+- D6 审查 minor（已修）：非事件样本 U=4 rollout 有 ~98.4% 概率中途切换 caption 版本（逐 section 独立全局随机抽）→ 裁决为一次 rollout 只抽一次并复用；事件样本逐 chunk 映射不变。
+- D6 审查证实项：torch.randint 首抽与旧行为逐位等价（Torch 2.10 实测）；`num_frame` 文件名字段确为 RGB 帧数、`//33` 与离线 chunk 数一致；filter 后 bucket 重建无 stale-index。
+
 - **rollout 冒烟 run2（终局）：8/8 ALL PASS**（job 5552, c-node06, ~48 min）——修正采样配置后双臂 latents 均有限，NaN 根因判定实锤；状态机与 run1 逐项一致；开销 +5.5%、峰值 43.3 GiB；σ_last=0.122≠0 实测确认 FiLM(σ_last) 写条件化为必要设计（呼应总纲 §二 σ_last 偏差项）。verdict: `logs/research/rollout-smoke-verdict-run2.md`。**管线状态机 GPU 门全绿，M1 训练链四批次（模块/transformer/trainer/管线）全部收口。**
