@@ -1,7 +1,8 @@
 # Upstream PR draft — stage-1 dataset fixes (epoch + metadata cache)
 
 > PR title: `Fix stage-1 persistent-worker epochs and reusable metadata caching`
-> Branch: `fix/stage1-dataset-epoch-and-cache-v2` (worktree `/mnt/beegfs/siyuan/workspace/helios-upstream-pr`), based on `team/mid_training_xiangbo` @ `34f5a99`; commits `73b2d47` + `0f27099`. Body below is ready to paste.
+> Branch: `fix/stage1-dataset-epoch-and-cache-v2` (worktree `/mnt/beegfs/siyuan/workspace/helios-upstream-pr`), based on `team/mid_training_xiangbo` @ `34f5a99`; commits `73b2d47` + `0f27099`.
+> **SUBMITTED 2026-07-23 (user-approved): https://github.com/Visko-Platform/helios-team/pull/1** (base `mid_training_xiangbo`, GitHub tip verified = local base `34f5a99`).
 
 # Summary
 

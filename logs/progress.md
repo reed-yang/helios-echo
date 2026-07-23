@@ -112,3 +112,4 @@
 - [x] 上游 PR 就绪（等用户 push）：worktree helios-upstream-pr 分支 fix/stage1-dataset-epoch-and-cache-v2（73b2d47 epoch + 0f27099 cache，基于 team@34f5a99）；7-agent 工作流 + 双镜头对抗审查 + 两轮修复 PASS + 主 agent 亲核 diff（4 文件 +457/−22 零泄漏）；PR 正文 logs/research/upstream-pr-dataset-fixes.md — commit 972bde2
 - [x] 审查反哺 fork：`_validate_cache_payload` 只验 samples[0] 的缺陷回移修复 + 回归测试 — commit 878a6f0（cache 套件 10/10）
 - **状态：训前验证梯子全部完成（①单测 79 绿 ②单卡 smoke ③DDP smoke + 重放证据）。Stage A 真训练只差：全量语料恢复 + 用户拍板。**
+- [x] **上游 PR 已提交**（用户批准）：https://github.com/Visko-Platform/helios-team/pull/1（base mid_training_xiangbo；GitHub 尖端核验 = 本地基点 34f5a99，无混入）
