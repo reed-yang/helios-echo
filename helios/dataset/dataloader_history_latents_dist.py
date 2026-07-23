@@ -122,7 +122,7 @@ class BucketedFeatureDataset(Dataset):
         buckets = candidate.get("buckets")
         if not isinstance(samples, list) or not isinstance(buckets, dict):
             return False
-        if samples and not isinstance(samples[0], dict):
+        if not all(isinstance(sample, dict) for sample in samples):
             return False
         return all(isinstance(indices, list) for indices in buckets.values())
 

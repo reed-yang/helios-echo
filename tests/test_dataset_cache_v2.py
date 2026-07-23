@@ -195,6 +195,10 @@ class DatasetCacheV2HardeningTest(unittest.TestCase):
             "bad_buckets": pickle.dumps(
                 {"schema": 2, "samples": [], "buckets": {"k": "not-a-list"}}
             ),
+            # first sample valid but a later one is not (samples[0]-only check gap)
+            "mixed_samples": pickle.dumps(
+                {"schema": 2, "samples": [{"uttid": "ok"}, "not-a-dict"], "buckets": {}}
+            ),
         }
         for name, payload in corrupt_variants.items():
             with self.subTest(variant=name):
