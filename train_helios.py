@@ -2771,9 +2771,6 @@ if __name__ == "__main__":
                 raise ValueError(f"Duplicate dataset name: {basename}")
             basenames.append(basename)
 
-    if conf.data_config.single_res:
-        assert conf.data_config.force_rebuild, "force_rebuild must be True when single_res is enabled"
-
     # ---------------------- For Wan ----------------------
     validate_evolving_memory_config(conf.training_config, conf.data_config, conf.validation_config)
 

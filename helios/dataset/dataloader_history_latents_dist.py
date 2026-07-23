@@ -61,15 +61,38 @@ class BucketedFeatureDataset(Dataset):
         self.buckets = defaultdict(list)
 
         for folder in self.feature_folders:
-            cache_file = os.path.join(folder, "dataset_cache.pkl")
+            cache_file = os.path.join(folder, "dataset_cache_v2.pkl")
             self._process_folder(folder, cache_file)
+
+        # Resolution filtering is configuration-dependent, so apply it only to the
+        # in-memory view of the configuration-independent v2 cache superset.
+        if self.single_res:
+            allowed_resolutions = {
+                (self.single_height, self.single_width),
+                (self.single_height // 2, self.single_width // 2),
+                (self.single_height // 4, self.single_width // 4),
+            }
+            kept = [
+                sample
+                for sample in self.samples
+                if (sample["height"], sample["width"]) in allowed_resolutions
+            ]
+            if len(kept) != len(self.samples):
+                print(
+                    f"Resolution filter: dropped {len(self.samples) - len(kept)} samples "
+                    f"({len(kept)} remain)"
+                )
+                self.samples = kept
+                self.buckets = defaultdict(list)
+                for sample_idx, sample_info in enumerate(self.samples):
+                    self.buckets[sample_info["bucket_key"]].append(sample_idx)
 
         # Rollout-length filter (design ch.2 D6): clean_all needs num_rollout_sections
         # consecutive sections; the offline encoder cuts consecutive 33-RGB-frame chunks
         # (get_short-latents.py: frame_window_size = (9-1)*4+1), so sections ==
         # num_frame // 33. Filtered IN MEMORY after cache load — the on-disk
-        # dataset_cache.pkl keeps the unfiltered superset so shared data folders stay
-        # valid for readers with other U (older readers do not validate cache contents).
+        # dataset_cache_v2.pkl keeps the unfiltered superset so shared data folders
+        # stay valid for readers with other U.
         # No-op for the current guarantee (num_frame >= 121 -> 3 sections >= default U=3).
         if self.return_all_vae_latent:
             frame_window_size = 33
@@ -86,20 +109,29 @@ class BucketedFeatureDataset(Dataset):
                     self.buckets[sample_info["bucket_key"]].append(sample_idx)
 
     def _process_folder(self, folder, cache_file):
-        if self.force_rebuild or not os.path.exists(cache_file):
+        cached_data = None
+        if not self.force_rebuild and os.path.exists(cache_file):
+            print(f"Loading cached metadata from: {folder}")
+            try:
+                with open(cache_file, "rb") as f:
+                    candidate = pickle.load(f)
+            except (OSError, pickle.UnpicklingError, EOFError):
+                candidate = None
+            if isinstance(candidate, dict) and candidate.get("schema") == 2:
+                cached_data = candidate
+
+        if cached_data is None:
             print(f"Building metadata cache for folder: {folder}")
             folder_samples, folder_buckets = self._build_folder_metadata(folder)
-
-            print(f"Saving metadata cache for folder: {folder}")
-            cached_data = {"samples": folder_samples, "buckets": folder_buckets}
+            cached_data = {"schema": 2, "samples": folder_samples, "buckets": folder_buckets}
             if not self.force_rebuild:
+                # First-build coordination across ranks is intentionally deferred to
+                # a later trainer-side rank-0/barrier improvement.
+                print(f"Saving metadata cache for folder: {folder}")
                 with open(cache_file, "wb") as f:
                     pickle.dump(cached_data, f)
             print(f"Cached {len(folder_samples)} samples from {folder}\n")
         else:
-            print(f"Loading cached metadata from: {folder}")
-            with open(cache_file, "rb") as f:
-                cached_data = pickle.load(f)
             folder_samples = cached_data["samples"]
             folder_buckets = cached_data["buckets"]
             print(f"Loaded {len(folder_samples)} samples from cache: {folder}\n")
@@ -134,15 +166,6 @@ class BucketedFeatureDataset(Dataset):
 
             # keep length >= 121
             if num_frame < 121:
-                continue
-
-            # keep resolution
-            allowed_resolutions = [
-                (self.single_height, self.single_width),
-                (self.single_height // 2, self.single_width // 2),
-                (self.single_height // 4, self.single_width // 4),
-            ]
-            if self.single_res and (height, width) not in allowed_resolutions:
                 continue
 
             bucket_key = (num_frame, height, width)

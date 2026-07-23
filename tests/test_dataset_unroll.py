@@ -132,8 +132,8 @@ class RolloutFilterTest(unittest.TestCase):
                 }
             )
             buckets.setdefault(key, []).append(i)
-        with open(os.path.join(tmpdir, "dataset_cache.pkl"), "wb") as f:
-            pickle.dump({"samples": samples, "buckets": buckets}, f)
+        with open(os.path.join(tmpdir, "dataset_cache_v2.pkl"), "wb") as f:
+            pickle.dump({"schema": 2, "samples": samples, "buckets": buckets}, f)
 
     def test_init_filters_short_samples_only_when_unrolling(self):
         with tempfile.TemporaryDirectory() as tmpdir:
