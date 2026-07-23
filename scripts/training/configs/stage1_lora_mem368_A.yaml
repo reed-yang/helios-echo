@@ -27,8 +27,12 @@ data_config:
   # ---- Stage 1 ----
   use_stage1_dataset: true
   instance_data_root:
-    # SAME corpus as stage1_lora_cfr_368: merged cfr_int + cfr_int_bprime (~388k clips >=121f) at 368x640.
-    - "/mnt/beegfs/dataset/video_single_24FPS/latents_cfr_int_30b_368x640"
+    # INTERIM 40GB subset (~2.6k clips) restored from the R2 backup
+    # (openhumanvid-backup/Xiangbo_july_8/helios_organized/human_single/latents.tar,
+    # head slice) — enough for smokes and pilots ONLY. The original corpus
+    # (latents_cfr_int_30b_368x640, ~168k clips, 2.53TB) vanished in the reorg;
+    # REPOINT to the full restore before launching real Stage A training.
+    - "/mnt/beegfs/siyuan/dataset/human_single_368x640_subset/latents"
 
 
 model_config:

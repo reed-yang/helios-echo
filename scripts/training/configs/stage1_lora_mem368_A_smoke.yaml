@@ -40,7 +40,8 @@ data_config:
   # ---- Stage 1 ----
   use_stage1_dataset: true
   instance_data_root:
-    - "/mnt/beegfs/dataset/video_single_24FPS/latents_cfr_int_30b_368x640"
+    # 40GB head-slice subset restored from the R2 backup (see main YAML note).
+    - "/mnt/beegfs/siyuan/dataset/human_single_368x640_subset/latents"
 
 
 model_config:
