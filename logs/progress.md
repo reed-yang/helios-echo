@@ -91,4 +91,13 @@
 - 测试面：全套 64 绿
 - [x] Task 5 配置分叉 `stage1_lora_mem368_A.yaml` — commit f843df8（Sol worker；程序化逐键 diff 恰 16 字段变更；13 个 memory 字段全显式；worker 抓到 max_train_steps 绝对语义 23500=19500+4000，主 agent 独立核验 train_helios.py:1154 确认）
 - 测试面：全套 69 绿。**Stage A 实现面（Task 1-5）全部完成并经对抗审查。**
-- 待做（训练前验证梯子，依次）：② 单卡真权重微型训练 smoke（3-5 步真 trainer 路径：接线/dtype/显存/loss 有限/可训练集断言/fork 机制——祖先 checkpoint 须置入新 output_dir 供 resume latest 发现/真数据 evicted 字段健诊/FORCE_LR resume 测试）→ ③ ≥2 卡 DDP smoke（混合全零/有效驱逐 rank + 显存/速度实测修订 §8 预算）→ ④ 用户拍板 Stage A 真训练（4k 步）。3c U-展开（Stage B）与 P2 Task 0 可交错。
+- 待做（训练前验证梯子，依次）：② 单卡真权重微型训练 smoke → ③ ≥2 卡 DDP smoke → ④ 用户拍板 Stage A 真训练。3c U-展开（Stage B）与 P2 Task 0 可交错。
+
+## 2026-07-23 凌晨后半（smoke 迭代 + 基础设施夜）
+
+- [x] 分叉机制修正 + merge 基座产出：`_merged/stage1_lora368_correct_merged19500`（MERGE RESULT: OK，28.6GB bf16，fp32 融合）— commit 6962644 + 工具 merge_lora_full_for_helios.py
+- [x] smoke 迭代抓真问题 ×2：run1'=force_rebuild 不变量；run3'=**D2 缺口**（trainer 构造字典漏 memory 键→模块未建→零可训练参数）— commit 43b7d88（memory_frame_hw 升格 config 字段，14 键断言）
+- [x] Slurm 事故 ×2 + 恢复 ×2（postmortem：logs/2026-07-23-postmortem-slurm-reconfigure-inval.md）：DefMemPerGPU/DefCpuPerGPU 在 24.05.7 触发全节点注册 INVAL，部署顺序假设被第二次试验推翻；调查报告（logs/research/slurm-defcpupergpu-inval-investigation.md）推荐 job_submit.lua 替代路线，待用户拍板
+- [x] mc-node01 修复：GPU2 硬件问题之外，nvidia_uvm 不干净卸载致**整节点** CUDA 死（这才是它闲置的真因）；rmmod/modprobe 后 7/8 卡可用
+- [x] 388k 扫描修复（用户批准）：v2 cache — commit be8ce09；对抗审查 3 blocking+2 major 全修 — commit 4108ab1（原子发布/自愈全覆盖/只读降级/断言范围化/配置翻转激活）；测试面 79 绿
+- [!] **硬阻塞（需用户/xiangbo 决策）**：368×640 latent 语料已从盘上消失——重组只写了 yaml 计划（human_single/latents, n=168431）但目录从未落地，demo latents 同灭；原始视频（videos_cfr_int + bprime）与 manifest 仍在，可重编码。smoke run4-6 均未及数据关（分别死于 CUDA/配置快照/排队+取消）。选项：A 问 xiangbo 数据去向（S3/他处）；B tools/offload_data 重编码（先子集起 smoke，后全量）；C wan22 704×1280 语料不可行（C5 冻结 + 谱系不匹配）
