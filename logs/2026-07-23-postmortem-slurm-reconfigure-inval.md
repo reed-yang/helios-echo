@@ -12,7 +12,7 @@ Date: 2026-07-23 02:00–02:15 (+0000) | Impact: all 8 GPU nodes unschedulable ~
 
 ## Root cause
 
-Deployment-order error on a NON-configless cluster (`SlurmctldParameters=(null)`): the new config existed only on the controller when `scontrol reconfigure` fired. The reconfigure triggered node re-registrations, which the new-config controller rejected against the old-config slurmds ("Invalid argument" → INVAL). The parameter change itself was not at fault.
+~~Deployment-order error~~ **RULED OUT by attempt 2** (02:35): with slurm.conf byte-identically synced to ALL 8 nodes BEFORE the single reconfigure, every node still went INVAL with the same "Low socket*core*thread count, Low CPUs" registration rejection. Conclusion: adding `DefMemPerGPU`/`DefCpuPerGPU` to the partition line itself trips a node-registration validation failure on **Slurm 24.05.7** (a version where reconfigure was reimplemented "restartless"). Second rollback via the proven path (restore everywhere + slurmd restarts + resume) recovered in ~4 min. Off-line investigation delegated (see logs/research/slurm-defcpupergpu-inval-investigation.md when it lands); do NOT retry these partition params on 24.05.7 without that verdict. Alternative default-injection mechanisms to evaluate: DefMemPerCPU, job_submit.lua, cli_filter, or a Slurm upgrade.
 
 ## Correct procedure (for re-applying the change)
 
