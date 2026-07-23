@@ -915,12 +915,20 @@ def main(args):
             "return_all_vae_latent": (
                 args.training_config.dmd_teacher_forcing and args.training_config.dmd_teacher_forcing_ratio > 0
             )
-            or args.training_config.is_use_gan,
+            or args.training_config.is_use_gan
+            or args.training_config.memory_tf_unroll,
             "history_sizes": args.training_config.history_sizes,
             "is_keep_x0": True,
             "force_rebuild": args.data_config.force_rebuild,
             "seed": args.seed,
+            # Evolving-memory write path (design ch.2 D4/D6): eviction slices when the
+            # memory module trains; unroll length + rollout metadata only under TF unroll
+            # (never override the constructor default of 3 for the existing TF/GAN paths).
+            "return_evicted_latent": args.training_config.is_train_memory_module,
         }
+        if args.training_config.memory_tf_unroll:
+            dataset_kwargs["num_rollout_sections"] = args.training_config.memory_unroll_sections
+            dataset_kwargs["return_rollout_metadata"] = True
     else:
         raise NotImplementedError
         dataset_kwargs = {

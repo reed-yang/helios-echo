@@ -18,6 +18,7 @@ class BucketedFeatureDataset(Dataset):
         return_all_vae_latent=False,
         return_prompt_raw=False,
         return_evicted_latent=False,
+        return_rollout_metadata=False,
         num_rollout_sections=3,
         single_res=False,
         single_height=384,
@@ -30,6 +31,7 @@ class BucketedFeatureDataset(Dataset):
         self.return_all_vae_latent = return_all_vae_latent
         self.return_prompt_raw = return_prompt_raw
         self.return_evicted_latent = return_evicted_latent
+        self.return_rollout_metadata = return_rollout_metadata
         self.num_rollout_sections = num_rollout_sections
         self.single_res = single_res
         self.single_height = single_height
@@ -53,6 +55,27 @@ class BucketedFeatureDataset(Dataset):
         for folder in self.feature_folders:
             cache_file = os.path.join(folder, "dataset_cache.pkl")
             self._process_folder(folder, cache_file)
+
+        # Rollout-length filter (design ch.2 D6): clean_all needs num_rollout_sections
+        # consecutive sections; the offline encoder cuts consecutive 33-RGB-frame chunks
+        # (get_short-latents.py: frame_window_size = (9-1)*4+1), so sections ==
+        # num_frame // 33. Filtered IN MEMORY after cache load — the on-disk
+        # dataset_cache.pkl keeps the unfiltered superset so shared data folders stay
+        # valid for readers with other U (older readers do not validate cache contents).
+        # No-op for the current guarantee (num_frame >= 121 -> 3 sections >= default U=3).
+        if self.return_all_vae_latent:
+            frame_window_size = 33
+            required = self.num_rollout_sections
+            kept = [s for s in self.samples if s["num_frame"] // frame_window_size >= required]
+            if len(kept) != len(self.samples):
+                print(
+                    f"Rollout filter: dropped {len(self.samples) - len(kept)} samples with "
+                    f"fewer than {required} sections ({len(kept)} remain)"
+                )
+                self.samples = kept
+                self.buckets = defaultdict(list)
+                for sample_idx, sample_info in enumerate(self.samples):
+                    self.buckets[sample_info["bucket_key"]].append(sample_idx)
 
     def _process_folder(self, folder, cache_file):
         if self.force_rebuild or not os.path.exists(cache_file):
@@ -215,21 +238,27 @@ class BucketedFeatureDataset(Dataset):
         )
         continue_vae_latent = torch.cat([zero_padding_vae, temp_vae_latent], dim=1)
 
+        # One seeded generator per (seed, epoch, idx): the first draw reproduces the
+        # previous per-sample choice_idx exactly; subsequent draws share the same
+        # deterministic stream (fixes divergence F3 where start_section_idx used the
+        # process-global RNG, decoupled from the seeded per-sample discipline).
         sample_seed = self.base_seed + self._epoch * 1000000 + idx
-        choice_idx = torch.randint(
-            0, total_sections, (1,), generator=torch.Generator().manual_seed(sample_seed)
-        ).item()
+        sample_generator = torch.Generator().manual_seed(sample_seed)
+        choice_idx = torch.randint(0, total_sections, (1,), generator=sample_generator).item()
         if choice_idx == 0 and x0_latent is not None:
             x0_latent = torch.zeros_like(x0_latent)
 
         clean_all_vae_latent = None
+        start_section_idx = None
         if self.return_all_vae_latent:
             max_start_idx = total_sections - self.num_rollout_sections
             if max_start_idx < 0:
                 raise ValueError(
                     f"Not enough sections: total_sections={total_sections}, num_rollout_sections={self.num_rollout_sections}"
                 )
-            start_section_idx = random.randint(0, max_start_idx)
+            start_section_idx = torch.randint(
+                0, max_start_idx + 1, (1,), generator=sample_generator
+            ).item()
             start_indice = start_section_idx * latent_window_size
             end_indice = start_indice + history_window_size + self.num_rollout_sections * latent_window_size
             clean_all_vae_latent = continue_source_latent[:, start_indice:end_indice, :, :]
@@ -251,7 +280,17 @@ class BucketedFeatureDataset(Dataset):
 
         # choice_idx is the index of the target chunk (0-based over total_sections). It is
         # returned so the multi-event path can look up which event owns this chunk.
-        return x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx, eviction
+        # start_section_idx is the ABSOLUTE first section of the clean_all slice —
+        # the trainer needs it to derive per-section eviction validity and prompts.
+        return (
+            x0_latent,
+            history_latent,
+            target_latent,
+            clean_all_vae_latent,
+            choice_idx,
+            start_section_idx,
+            eviction,
+        )
 
     def __len__(self):
         return len(self.samples)
@@ -403,9 +442,15 @@ class BucketedFeatureDataset(Dataset):
                 feature_data = torch.load(sample_info["file_path"], map_location="cpu", weights_only=False)
                 feature_data = self._apply_tag_embed_override(feature_data, sample_info["file_path"])
                 feature_data = self._apply_text_sidecar(feature_data, sample_info["file_path"])
-                x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx, eviction = (
-                    self.prepare_stage1_latent(feature_data["vae_latent"], idx, base_vae_latent)
-                )
+                (
+                    x0_latent,
+                    history_latent,
+                    target_latent,
+                    clean_all_vae_latent,
+                    choice_idx,
+                    start_section_idx,
+                    eviction,
+                ) = self.prepare_stage1_latent(feature_data["vae_latent"], idx, base_vae_latent)
                 if self.return_prompt_raw:
                     prompt_raws = feature_data["prompt_raw"]
                 break
@@ -444,6 +489,20 @@ class BucketedFeatureDataset(Dataset):
             output_dict["evicted_latents"] = evicted_latent
             output_dict["evicted_history_latents"] = evicted_history
             output_dict["evicted_valid_frames"] = evicted_valid_frames
+
+        if self.return_rollout_metadata:
+            # Unroll consumers need the ABSOLUTE start section (per-section eviction
+            # validity depends on the position relative to the zero prefix) and one
+            # prompt per unrolled section (multi-event data maps each chunk to its
+            # owning event; design ch.2 D6).
+            assert start_section_idx is not None, (
+                "return_rollout_metadata requires return_all_vae_latent"
+            )
+            output_dict["start_section_idx"] = start_section_idx
+            output_dict["section_prompt_embeds"] = [
+                self._pick_prompt_embed(feature_data, start_section_idx + u)
+                for u in range(self.num_rollout_sections)
+            ]
 
         return output_dict
 
