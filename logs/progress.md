@@ -161,3 +161,8 @@
 - 一致性实证:已下载的 36,673 文件与 07-15 备份**逐字节相同**(cmp 抽检)→ 同目录 `--ignore-existing` 续填即通向全量,tar 断点难题消解。
 - 全量同步已以 setsid 脱离会话启动(`/mnt/beegfs/siyuan/dataset/r2_full_sync.sh`,log `results/r2_full_sync_run1.log`,剩余 ~1.8TiB 预计 ~20h);loader 只认 *.pt,rclone .partial 临时文件对扫描不可见;陈旧 v2 cache 已删(排队作业起跑时按当时快照重建),同步完成后脚本再次失效 cache 供全量重扫。
 - captions.jsonl / dataset.yaml 已刷新为 07-15 版本。
+
+### 2026-07-27 晚 · 双跑就位 + 全量同步(pre-compact 收口)
+- 5693(slice512,57,741-clip 快照)@ mc-node01 RUNNING;5694(pilot 自 ckpt-500 resume)@ c-node05 RUNNING(节点 "Kill task failed" drain 按标准程序 resume 后派发);均 sbatch + 前哨检查,零警报。
+- 全量同步 ~71k/168,431 @ ~34 MiB/s(transfers 并发实测 8/32/64 = 26/34/33,出口硬顶),ETA 明晨;完成自动失效 cache。
+- 数据源已切 07-15 散文件备份(逐字节一致实证);checkpoint §六/§七 补录晚间全部事件与实验速览。
