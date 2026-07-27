@@ -136,3 +136,8 @@
 - Metrics jobs 5681-5684 4/4 COMPLETED 0:0;四 JSON 66 chunks/65 boundaries 完整有限;硬门全过(writes=64×2、开销继承 run2 +5.5%)。
 - Parity caveat 根因判定(orchestrator 时间线分析,见 verdict addendum):写前 3 chunk 双臂同量级 → 管线/RNG 无 bug;off 臂经典漂移(motion↑ + 去饱和 175→24-57),on 臂未训练记忆反馈回路致静态塌缩(motion→0)但去饱和更缓。R1 = 未训练记忆长时域基线,非效果参考;无需脚手架修复。
 - P2-interim 三任务(0/2/3)全部收口:verdict `logs/research/p2-interim-verdict-r1.md`。
+
+### 2026-07-27 · 512GiB 切片落位 + slice512 扩量 run 启动
+- 恢复终态:RESTORE_EXIT=2(预期截断 EOF),36,674 文件/512G;目录重排(tar 内层 latents/ 前缀上提);删 1 截断尾(torch.load 实证损坏)→ **36,673 clips**;首/中/尾抽检 LOAD_OK(schema: vae_latent/first_frames_image/prompt_raw/prompt_embed_short);captions.jsonl + dataset.yaml 随行。
+- 扩量 run 启动:c-node04 8×H200,`stage1_lora_mem368_A_slice512.yaml`(≈12.8× pilot 语料,~1.05 epoch/4000 步 → 实为 ~3.5 epochs@36.7k),日志 `results/stageA_slice512_run1.log`,watcher 双通道。
+- 全量语料(2.53TB)剩余部分:园区出口 ~26MiB/s 下窗口内不可达;断点扩容需 tar member 边界重对齐(header 扫描法)或全量重流,留给用户决策。
