@@ -90,3 +90,5 @@
 - **为何此前全绿**:rollout run2 走 50 步验证配置 = Stage-1 路径;P2 Task 0 的 GPU dry-run 门(job 5667, mc-node01, run1 日志 `results/p2_task0_dryrun_run1.log`)正是为在 66-section 长 rollout 前暴露配方映射缺口而设 —— 按设计拦截。
 - **通过项**(7/9):Distilled 6 shard 无 memory tensor、模块存在、load 后 query_state=None、reset 后 = M₀、training-side pipeline、linear dynamic shifting、proj_out 非零有限。
 - **修复方向**:stage2_sample 镜像条件返回契约(仅 capture_last_step=True 时三元组;捕获 = 最后 stage 最后调度步 + 该步 σ),非捕获调用方零改动。
+
+- **整节点内存记账再次实证(2026-07-27,c-node08)**:4 个单卡 A/B 作业不带 `--mem` 提交 → 首作业按 DefMemPerNode=UNLIMITED 吃满节点内存记账,其余 3 个 PEND(Resources/ReqNodeNotAvail),8 卡节点被 1 卡作业锁死;显式 `--mem=200G --cpus-per-task=16` 重发后 4 作业即刻并行(5677-5680)。job_submit.lua 默认配额方案的直接依据。另:后台包装脚本不 `wait` 会孤儿化 srun(仍存活但失去完成通知),包装必须 `wait`。

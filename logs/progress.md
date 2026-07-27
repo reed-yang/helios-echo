@@ -126,3 +126,8 @@
 - run1(job 5667)按设计拦获 stage-2 捕获契约缺失 → 修复 `b671ba6`(4 行条件返回 + 3 回归测试,TDD 红灯复现,82/82 CPU 全绿,双镜头审查 1 轮闭环)→ run2 门重跑:1-section 9/9 + 5-section 双臂 17/17 ALL PASS(`results/p2_task0_dryrun_run2.log`)。
 - 实证:σ_last 逐 section 非零([0.391, 0.657×4],首节 amplify 效应)→ FiLM(σ_last) 设计必要性落地;writes=sections−2;off 臂真 no-KV;harness 入库 `0711773`。
 - 教训:workflow 内 GPU 执行 agent 被 structured-output 终止时后台 srun 连带 CANCELLED(job 5668)→ GPU 长任务改由主会话后台直跑,workflow 只做实现+审查。
+
+### 2026-07-27 · P2 Task 2 GPU 全量完成
+- A/B driver 审查闭环后彩排(3-section 双臂)→ 全量 66-section 2 prompts × 2 arms 4 进程并行(jobs 5677-5680, c-node08):4/4 EXIT=0,2178 帧全有限,on 臂 writes=64、queue=[64,65]、66 σ 齐全,双臂 pair-seed 对齐。driver 入库。
+- 事故与修正:不带 --mem 提交 4 作业被整节点内存记账串行化(1 跑 3 等)→ scancel 后显式 --mem=200G 重发即并行;实证已记 findings(支持 job_submit.lua 方案)。
+- wall-clock 受同节点竞争污染(on/off: 484/516s 与 1089/473s)→ 开销验收引用 run2 洁净测量 +5.5%,Task 3 verdict 中如实标注。
