@@ -155,3 +155,9 @@
 - job 5692(slice512 @ c-node08)首步 OOM:属主检查(0 进程)与训练起步之间,节点被外来 Slurm 外进程占走 79.42GB/卡(79+60>140);随后 ssh c-node08 无响应。实证:属主检查存在竞态窗口,pin 节点不可靠。
 - **新方案(5693 slice512 / 5694 pilot-resume)**:不 pin 节点,`--exclude` pinghe(c-node04/06)/rwtag(c-node07)/失联 c-node08/drained c-node03,正规排队在 yuheng 的 Slurm 作业之后;sbatch 内置前哨检查(分配到的节点若有任何外来 GPU 进程 → PREFLIGHT_ABORT exit 42 报警,拒绝叠加)。节点腾出即自动开跑,无人值守安全。
 - 用户规则入长期 memory:pinghe 任务保持安宁;yuheng/xiangbo 可叠加(显存核算前提);nvidia-smi 属主检查前置。
+
+### 2026-07-27 · 数据源切换至 2026-07-15 备份 + 全量续填启动(用户指令)
+- 用户指定改用 `r2:openhumanvid-backup/xiangbo_backup_2026-07-15_helios_organized/human_single/`。勘察:**散文件结构**(latents/ 168,431 对象 2.300TiB,非 tar),dataset.yaml provenance = 消失的 canonical 路径;captions.jsonl 更新为 148.7MB 清洗版;另有 latents_text_v3/(仅 1,211 个,实验小集,未取)。
+- 一致性实证:已下载的 36,673 文件与 07-15 备份**逐字节相同**(cmp 抽检)→ 同目录 `--ignore-existing` 续填即通向全量,tar 断点难题消解。
+- 全量同步已以 setsid 脱离会话启动(`/mnt/beegfs/siyuan/dataset/r2_full_sync.sh`,log `results/r2_full_sync_run1.log`,剩余 ~1.8TiB 预计 ~20h);loader 只认 *.pt,rclone .partial 临时文件对扫描不可见;陈旧 v2 cache 已删(排队作业起跑时按当时快照重建),同步完成后脚本再次失效 cache 供全量重扫。
+- captions.jsonl / dataset.yaml 已刷新为 07-15 版本。
