@@ -145,3 +145,8 @@
 ### 2026-07-27 · 窗口收口
 - 双跑健康:pilot 854+ 步(ckpt-500 结构全验证)、slice512 320+ 步;loss CSV + run verdict 入库(`logs/research/stage-a-first-runs-verdict-2026-07-27.md`)。
 - 新 session checkpoint:`logs/session-ckpts/2026-07-27-session-checkpoint.md`(在跑作业、完成矩阵、待决策、环境事实)。
+
+### 2026-07-27 · 节点礼仪整改 + 会话重启事故 + sbatch 化
+- 用户纠正:c-node04/06 上叠了 pinghe 的 Slurm 外直跑作业(sinfo idle 的盲区)——迁移方案执行中恰逢 Claude 进程重启,后台 srun 连带阵亡(pilot 死于 ~980 步,ckpt-1000 未落,存 ckpt-500;slice512 死于 ~450 步,无 ckpt,段落损失)。两节点已让出。
+- **纠正措施(用户指令)**:训练启动全部改 sbatch(作业与登录会话解耦):`scripts/training/sbatch_stage1_mem368_slice512.sbatch`(已提交 job 5692 @ c-node08,全集群唯一真空节点)+ `sbatch_stage1_mem368_pilot_resume.sbatch`(备好未提交——Slurm 看不见 pinghe,盲目 pin 节点会再次叠加;等真空节点后填 -w 提交,自动从 ckpt-500 续)。
+- 礼仪规则固化到长期 memory:任何 srun/sbatch 前先 `ssh <node> nvidia-smi --query-compute-apps` + 进程属主检查;pinghe 节点禁停;yuheng 节点可叠但需显存余量核算(本配方 ~120GB/卡,H200 141GB 放不下与 yuheng 53-75GB 叠加)。
