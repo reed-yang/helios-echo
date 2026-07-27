@@ -141,3 +141,7 @@
 - 恢复终态:RESTORE_EXIT=2(预期截断 EOF),36,674 文件/512G;目录重排(tar 内层 latents/ 前缀上提);删 1 截断尾(torch.load 实证损坏)→ **36,673 clips**;首/中/尾抽检 LOAD_OK(schema: vae_latent/first_frames_image/prompt_raw/prompt_embed_short);captions.jsonl + dataset.yaml 随行。
 - 扩量 run 启动:c-node04 8×H200,`stage1_lora_mem368_A_slice512.yaml`(≈12.8× pilot 语料,~1.05 epoch/4000 步 → 实为 ~3.5 epochs@36.7k),日志 `results/stageA_slice512_run1.log`,watcher 双通道。
 - 全量语料(2.53TB)剩余部分:园区出口 ~26MiB/s 下窗口内不可达;断点扩容需 tar member 边界重对齐(header 扫描法)或全量重流,留给用户决策。
+
+### 2026-07-27 · 窗口收口
+- 双跑健康:pilot 854+ 步(ckpt-500 结构全验证)、slice512 320+ 步;loss CSV + run verdict 入库(`logs/research/stage-a-first-runs-verdict-2026-07-27.md`)。
+- 新 session checkpoint:`logs/session-ckpts/2026-07-27-session-checkpoint.md`(在跑作业、完成矩阵、待决策、环境事实)。
