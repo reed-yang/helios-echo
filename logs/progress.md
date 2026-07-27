@@ -113,3 +113,11 @@
 - [x] 审查反哺 fork：`_validate_cache_payload` 只验 samples[0] 的缺陷回移修复 + 回归测试 — commit 878a6f0（cache 套件 10/10）
 - **状态：训前验证梯子全部完成（①单测 79 绿 ②单卡 smoke ③DDP smoke + 重放证据）。Stage A 真训练只差：全量语料恢复 + 用户拍板。**
 - [x] **上游 PR 已提交**（用户批准）：https://github.com/Visko-Platform/helios-team/pull/1（base mid_training_xiangbo；GitHub 尖端核验 = 本地基点 34f5a99，无混入）
+
+## 2026-07-27 · 10h 自主窗口:双轨训练 + 语料扩容
+
+- **Gate 4 放行**:用户指令"完成所有预期任务并推进得到实验训练结果"+ 存储已清理、多节点空闲、可酌情下载数据。
+- **Pilot(保底出结果)**:job 5666 @ c-node06 8×H200,`stage1_lora_mem368_A_pilot.yaml`(= 主配方,独立 output_dir,40GB 子集,4000 步 ≈ 44.6 epochs)。日志 `results/stageA_pilot_run1.log`,watcher 双通道(失败签名 + 15min 步数/ckpt 巡检)。
+- **带宽实测**:R2 单流 25.9 MiB/s,4 流 40 MiB/s,12 流 25.6 MiB/s(不扩展,园区出口硬顶)→ 全量 2.53TB ≈ 17-26h 窗口内不可行。
+- **扩容决策**:流式 512GiB 头部切片(`rclone cat --count | tar -x`,~5.6h,≈34k clips = 12× pilot 语料)→ `/mnt/beegfs/siyuan/dataset/human_single_368x640_slice512g/`(独立目录,不混写子集)。尾部截断 member 为预期终态,恢复后删截断尾 + torch.load 抽检再启用。`stage1_lora_mem368_A_slice512.yaml` 已备好(c-node04 待发)。
+- **上游 PR#1**:OPEN,无人工 review,Copilot CI 因 GitHub Actions 账单未启动 —— 无可操作项。
