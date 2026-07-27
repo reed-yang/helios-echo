@@ -131,3 +131,8 @@
 - A/B driver 审查闭环后彩排(3-section 双臂)→ 全量 66-section 2 prompts × 2 arms 4 进程并行(jobs 5677-5680, c-node08):4/4 EXIT=0,2178 帧全有限,on 臂 writes=64、queue=[64,65]、66 σ 齐全,双臂 pair-seed 对齐。driver 入库。
 - 事故与修正:不带 --mem 提交 4 作业被整节点内存记账串行化(1 跑 3 等)→ scancel 后显式 --mem=200G 重发即并行;实证已记 findings(支持 job_submit.lua 方案)。
 - wall-clock 受同节点竞争污染(on/off: 484/516s 与 1089/473s)→ 开销验收引用 run2 洁净测量 +5.5%,Task 3 verdict 中如实标注。
+
+### 2026-07-27 · P2 Task 3 收口(P2-interim 全链完成)
+- Metrics jobs 5681-5684 4/4 COMPLETED 0:0;四 JSON 66 chunks/65 boundaries 完整有限;硬门全过(writes=64×2、开销继承 run2 +5.5%)。
+- Parity caveat 根因判定(orchestrator 时间线分析,见 verdict addendum):写前 3 chunk 双臂同量级 → 管线/RNG 无 bug;off 臂经典漂移(motion↑ + 去饱和 175→24-57),on 臂未训练记忆反馈回路致静态塌缩(motion→0)但去饱和更缓。R1 = 未训练记忆长时域基线,非效果参考;无需脚手架修复。
+- P2-interim 三任务(0/2/3)全部收口:verdict `logs/research/p2-interim-verdict-r1.md`。
