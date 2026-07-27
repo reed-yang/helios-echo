@@ -376,16 +376,33 @@ def load_pipeline(torch, memory_partial=None):
     )
     if memory_partial is not None:
         # Overwrite freshly initialized memory components with Stage A trained
-        # weights. Every key in the file must land in the model; the rest of the
-        # model keeps its pretrained values. load_state_dict casts dtype/device
-        # per-parameter and consumes no RNG, preserving arm pairing.
+        # weights. The partial also carries patch_long/mid/short convs, but those
+        # are backbone components frozen during Stage A (zero movement across
+        # checkpoints) and belong to the *training* base, which differs sharply
+        # from the distilled base used here (patch_long rel_l2 ~1.17) — loading
+        # them would corrupt history patchify. Only the actually trained,
+        # base-agnostic memory components are loaded. load_state_dict casts
+        # dtype/device per-parameter and consumes no RNG, preserving arm pairing.
         state = torch.load(str(memory_partial), map_location="cpu", weights_only=True)
-        _, unexpected = transformer.load_state_dict(state, strict=False)
+        skipped = [k for k in state if k.startswith(("patch_long", "patch_mid", "patch_short"))]
+        loadable = {
+            k: v
+            for k, v in state.items()
+            if k.startswith("evolving_memory.") or "memory_key_scale" in k
+        }
+        leftover = set(state) - set(loadable) - set(skipped)
+        if leftover:
+            raise RuntimeError(f"memory partial has unclassified keys: {sorted(leftover)[:5]}")
+        _, unexpected = transformer.load_state_dict(loadable, strict=False)
         if unexpected:
             raise RuntimeError(
                 f"memory partial has {len(unexpected)} keys absent from the model: {unexpected[:5]}"
             )
-        print(f"MEMORY_PARTIAL loaded keys={len(state)} from {memory_partial}", flush=True)
+        print(
+            f"MEMORY_PARTIAL loaded keys={len(loadable)} skipped_backbone={len(skipped)} "
+            f"from {memory_partial}",
+            flush=True,
+        )
     scheduler = HeliosScheduler.from_pretrained(str(DISTILLED), subfolder="scheduler", stages=3)
     pipe = HeliosPipeline.from_pretrained(
         str(DISTILLED),
