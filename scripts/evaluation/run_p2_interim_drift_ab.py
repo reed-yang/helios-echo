@@ -90,6 +90,15 @@ def parse_args(argv=None):
     )
     parser.add_argument("--base-seed", type=int, default=7)
     parser.add_argument(
+        "--memory-partial",
+        type=Path,
+        help=(
+            "optional transformer_partial.pth from Stage A training; loads trained "
+            "memory components (evolving_memory, patch convs, memory_key_scale) into "
+            "the freshly constructed transformer; on-arm only"
+        ),
+    )
+    parser.add_argument(
         "--run-id",
         help="shared A/B run identifier (pass the same value to parallel processes)",
     )
@@ -114,6 +123,11 @@ def parse_args(argv=None):
         parser.error("a real rollout requires both --prompt-index and --arm")
     if not args.dry_run and args.run_id is None:
         parser.error("a real rollout requires --run-id shared by every paired process")
+    if args.memory_partial is not None:
+        if args.arm != "on":
+            parser.error("--memory-partial is only valid with --arm on")
+        if not args.memory_partial.is_file():
+            parser.error(f"--memory-partial not found: {args.memory_partial}")
     return args
 
 
@@ -348,7 +362,7 @@ def probe_video(video_path, ffprobe_path, expected_frames):
     }
 
 
-def load_pipeline(torch):
+def load_pipeline(torch, memory_partial=None):
     from helios.modules.transformer_helios import HeliosTransformer3DModel
     from helios.pipelines.pipeline_helios import HeliosPipeline
     from helios.scheduler.scheduling_helios import HeliosScheduler
@@ -360,6 +374,18 @@ def load_pipeline(torch):
         torch_dtype=torch.bfloat16,
         device_map="cuda",
     )
+    if memory_partial is not None:
+        # Overwrite freshly initialized memory components with Stage A trained
+        # weights. Every key in the file must land in the model; the rest of the
+        # model keeps its pretrained values. load_state_dict casts dtype/device
+        # per-parameter and consumes no RNG, preserving arm pairing.
+        state = torch.load(str(memory_partial), map_location="cpu", weights_only=True)
+        _, unexpected = transformer.load_state_dict(state, strict=False)
+        if unexpected:
+            raise RuntimeError(
+                f"memory partial has {len(unexpected)} keys absent from the model: {unexpected[:5]}"
+            )
+        print(f"MEMORY_PARTIAL loaded keys={len(state)} from {memory_partial}", flush=True)
     scheduler = HeliosScheduler.from_pretrained(str(DISTILLED), subfolder="scheduler", stages=3)
     pipe = HeliosPipeline.from_pretrained(
         str(DISTILLED),
@@ -518,13 +544,26 @@ def run(args, run_id, prompt_path, prompts):
     seed = entry["seed"]
     paths = {key: Path(value) for key, value in entry.items() if key in ("video", "manifest")}
     regime = generation_regime(args.sections)
-    config_digest = canonical_digest(
-        {
-            "model": str(DISTILLED),
-            "memory_module_kwargs": MEMORY_KWARGS,
-            "regime": regime,
+    memory_partial_info = None
+    if args.memory_partial is not None:
+        hasher = hashlib.sha256()
+        with open(args.memory_partial, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 24), b""):
+                hasher.update(chunk)
+        memory_partial_info = {
+            "path": str(args.memory_partial.resolve()),
+            "sha256": hasher.hexdigest(),
         }
-    )
+    digest_payload = {
+        "model": str(DISTILLED),
+        "memory_module_kwargs": MEMORY_KWARGS,
+        "regime": regime,
+    }
+    # Only fold the partial into the digest when present so that runs without
+    # --memory-partial keep the exact r1 config digest.
+    if memory_partial_info is not None:
+        digest_payload["memory_partial_sha256"] = memory_partial_info["sha256"]
+    config_digest = canonical_digest(digest_payload)
     milestones = Milestones()
     timings = {}
     started = time.perf_counter()
@@ -537,7 +576,7 @@ def run(args, run_id, prompt_path, prompts):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     load_started = time.perf_counter()
-    pipe = load_pipeline(torch)
+    pipe = load_pipeline(torch, memory_partial=args.memory_partial)
     timings["load_seconds"] = time.perf_counter() - load_started
     if bool(pipe.scheduler.config.use_dynamic_shifting) is not REGIME["use_dynamic_shifting"]:
         raise RuntimeError("Distilled scheduler use_dynamic_shifting does not match the mapped regime")
@@ -651,6 +690,7 @@ def run(args, run_id, prompt_path, prompts):
             "with the same paired seed; evolving-memory read/write operations do not consume that generator."
         ),
         "model": str(DISTILLED),
+        "memory_partial": memory_partial_info,
         "source": source,
         "git_commit": source["git_commit"],
         "config_digest_sha256": config_digest,
