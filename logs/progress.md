@@ -150,3 +150,8 @@
 - 用户纠正:c-node04/06 上叠了 pinghe 的 Slurm 外直跑作业(sinfo idle 的盲区)——迁移方案执行中恰逢 Claude 进程重启,后台 srun 连带阵亡(pilot 死于 ~980 步,ckpt-1000 未落,存 ckpt-500;slice512 死于 ~450 步,无 ckpt,段落损失)。两节点已让出。
 - **纠正措施(用户指令)**:训练启动全部改 sbatch(作业与登录会话解耦):`scripts/training/sbatch_stage1_mem368_slice512.sbatch`(已提交 job 5692 @ c-node08,全集群唯一真空节点)+ `sbatch_stage1_mem368_pilot_resume.sbatch`(备好未提交——Slurm 看不见 pinghe,盲目 pin 节点会再次叠加;等真空节点后填 -w 提交,自动从 ckpt-500 续)。
 - 礼仪规则固化到长期 memory:任何 srun/sbatch 前先 `ssh <node> nvidia-smi --query-compute-apps` + 进程属主检查;pinghe 节点禁停;yuheng 节点可叠但需显存余量核算(本配方 ~120GB/卡,H200 141GB 放不下与 yuheng 53-75GB 叠加)。
+
+### 2026-07-27 · c-node08 OOM 事故 + 转入排队制
+- job 5692(slice512 @ c-node08)首步 OOM:属主检查(0 进程)与训练起步之间,节点被外来 Slurm 外进程占走 79.42GB/卡(79+60>140);随后 ssh c-node08 无响应。实证:属主检查存在竞态窗口,pin 节点不可靠。
+- **新方案(5693 slice512 / 5694 pilot-resume)**:不 pin 节点,`--exclude` pinghe(c-node04/06)/rwtag(c-node07)/失联 c-node08/drained c-node03,正规排队在 yuheng 的 Slurm 作业之后;sbatch 内置前哨检查(分配到的节点若有任何外来 GPU 进程 → PREFLIGHT_ABORT exit 42 报警,拒绝叠加)。节点腾出即自动开跑,无人值守安全。
+- 用户规则入长期 memory:pinghe 任务保持安宁;yuheng/xiangbo 可叠加(显存核算前提);nvidia-smi 属主检查前置。

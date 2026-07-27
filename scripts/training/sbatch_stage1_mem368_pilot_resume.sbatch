@@ -1,14 +1,21 @@
 #!/bin/bash
 #SBATCH -p gpu
-##SBATCH -w <SET-NODE-AFTER-OWNERSHIP-CHECK>
+#SBATCH --exclude=c-node03,c-node04,c-node06,c-node07,c-node08
 #SBATCH --gres=gpu:h200:8
 #SBATCH --cpus-per-task=96
 #SBATCH --time=48:00:00
-#SBATCH --job-name=stageA_pilot_resume
+#SBATCH --job-name=stageA_pilot_res
 #SBATCH --output=/mnt/beegfs/siyuan/workspace/helios-echo/results/stageA_pilot_run2.log
-# Resumes the pilot from checkpoint-500 (resume_from_checkpoint: "latest").
-# DO NOT submit blindly: Slurm cannot see non-Slurm colleague jobs — run the
-# nvidia-smi ownership check on the target node first, then set -w above.
+# Queued without -w: Slurm serializes us behind visible jobs on the allowed
+# nodes. Exclusions: c-node04/06 pinghe (must stay undisturbed), c-node07
+# rwtag, c-node08 foreign non-Slurm load + unresponsive, c-node03 drained.
+# Preflight guards against colleagues' non-Slurm GPU processes (invisible to
+# Slurm): bail out loudly instead of stacking into an OOM.
+foreign=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l)
+if [ "$foreign" -gt 0 ]; then
+  echo "PREFLIGHT_ABORT: $foreign foreign GPU processes on $(hostname); refusing to stack"
+  exit 42
+fi
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 export WANDB_MODE=offline
 export PYTHONPATH=.
