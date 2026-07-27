@@ -83,3 +83,10 @@
 - **训前门全关**：②单卡 smoke（3 步,checkpoint 84 partial=78 memory+6 patch,query_state 零泄漏,v2 cache 生产原子落盘）③双卡 DDP（5 步零 NCCL 错误）+ 确定性重放证据（step 3/4/5 跨 rank 混合驱逐 5 对,双次重放逐字节一致,logs/research/ddp-smoke-draw-replay.md）——3b 审查设立的 DDP 验证条件全部实证。
 - **latent .pt 载荷结构**（实测）：`{vae_latent (num_sections,16,9,46,80), prompt_embed (512,4096), prompt_embed_short (512,4096), prompt_raw, first_frames_image}`——离线预切 section、双 caption 版本内嵌（caption_version 抽签的物理来源）。
 - **v2 cache 缺陷回移**：上游移植的对抗审查发现 `_validate_cache_payload` 只验 `samples[0]`（混合合法/非法载荷漏过→后续 single_res 过滤 TypeError 而非静默重建）；fork 同缺陷已修（878a6f0）+ 上游 PR 版本已含全样本校验。
+
+## P2 Task 0 门拦获:Stage-2 采样路径缺 memory 捕获契约(2026-07-27)
+
+- **缺陷**:训练侧 `pipeline_helios.py` 的 capture 三元组契约只在 Stage-1 `sample` 实现(:644-646);`stage2_sample` 裸返 latent(:884),而 section 循环在 `mem_enabled` 时无条件三元组解包(:1511-1512)→ Distilled 配方(is_enable_stage2)12 采样步跑完后 `ValueError: not enough values to unpack`。
+- **为何此前全绿**:rollout run2 走 50 步验证配置 = Stage-1 路径;P2 Task 0 的 GPU dry-run 门(job 5667, mc-node01, run1 日志 `results/p2_task0_dryrun_run1.log`)正是为在 66-section 长 rollout 前暴露配方映射缺口而设 —— 按设计拦截。
+- **通过项**(7/9):Distilled 6 shard 无 memory tensor、模块存在、load 后 query_state=None、reset 后 = M₀、training-side pipeline、linear dynamic shifting、proj_out 非零有限。
+- **修复方向**:stage2_sample 镜像条件返回契约(仅 capture_last_step=True 时三元组;捕获 = 最后 stage 最后调度步 + 该步 σ),非捕获调用方零改动。
