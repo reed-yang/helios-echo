@@ -799,9 +799,9 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 noise_pred = cond_ret[0]
                 if capture_now:
                     capture = cond_ret[2]
-                    # Actual sigma of this forward (post set_timesteps; for DMD
-                    # this is the stage-local exit sigma, NOT ~0 — design ch.3 偏差1).
-                    sigma_last = float(t.item()) / 1000.0
+                    # Preserve the capture forward's actual schedule sigma; its
+                    # stage-local timestep is not a global sigma coordinate.
+                    sigma_last = float(self.scheduler.sigmas[idx].item())
 
                 if self.do_classifier_free_guidance:
                     with self.transformer.cache_context("cond_uncond"):
@@ -881,6 +881,9 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
                 i += 1
 
+        # Capture-off callers rely on the original bare-tensor return contract.
+        if capture_last_step:
+            return latents, capture, sigma_last
         return latents
 
     @property
