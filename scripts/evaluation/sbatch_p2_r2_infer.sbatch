@@ -20,7 +20,20 @@ cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
 
 echo "JOB=$SLURM_JOB_ID node=$(hostname) cvd=${CUDA_VISIBLE_DEVICES:-unset} partial=$PARTIAL pidx=$PIDX runid=$RUNID"
-/usr/bin/nvidia-smi --query-gpu=index,memory.used --format=csv,noheader || true
+/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.used --format=csv,noheader || true
+
+# c-node08 leaks an unmanaged Prohibited-mode GPU into every job cgroup, and
+# it renumbers ahead of most allocations, so Slurm's CUDA_VISIBLE_DEVICES=0
+# frequently points at it (cudaErrorDevicesUnavailable). Remap to the first
+# visible GPU whose compute mode actually admits new contexts.
+goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode --format=csv,noheader | /usr/bin/awk -F', ' '$2 == "Default" {print $1; exit}')
+if [ -z "$goodidx" ]; then
+  echo "NO_DEFAULT_MODE_GPU_VISIBLE"
+  echo "EXIT_CODE=43"
+  exit 43
+fi
+export CUDA_VISIBLE_DEVICES="$goodidx"
+echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 
 PYTHONPATH=. "$ENV/bin/python" scripts/evaluation/run_p2_interim_drift_ab.py \
   --arm on \
