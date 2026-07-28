@@ -23,11 +23,14 @@ ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
 echo "JOB=$SLURM_JOB_ID node=$(hostname) cvd=${CUDA_VISIBLE_DEVICES:-unset} arm=$ARM pidx=$PIDX runid=$RUNID partial=$PARTIAL"
 /usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.used --format=csv,noheader || true
 
-# c-node08 leaks an unmanaged Prohibited-mode GPU into every job cgroup (see
-# findings 2026-07-27); remap to the first visible GPU that admits contexts.
-goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode --format=csv,noheader | /usr/bin/awk -F', ' '$2 == "Default" {print $1; exit}')
+# Compute nodes leak an unmanaged Prohibited-mode GPU into every job cgroup
+# (findings 2026-07-27), and colleagues' stacked processes grow dynamically
+# (2026-07-28: 63GB -> 116GB mid-run OOMed job 5739). Pick the Default-mode
+# visible GPU with the most free memory and require ~60GB headroom.
+goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
+  | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
 if [ -z "$goodidx" ]; then
-  echo "NO_DEFAULT_MODE_GPU_VISIBLE"
+  echo "NO_GPU_WITH_HEADROOM"
   echo "EXIT_CODE=43"
   exit 43
 fi
