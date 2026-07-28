@@ -172,3 +172,5 @@
 - 2026-07-28 凌晨:P2-interim r2 收口——4 支训练后记忆长视频(jobs 5718/5722-5724,90.75s each,13.7 min/臂)全绿 + metrics 三方对照完成。**核心结果:静态塌缩消除(motion 全程存活 vs 未训练臂 →0.02)、去饱和漂移翻转(sat 斜率 −1.2~−2.4 → ≈0~+0.85)**。判定:`logs/research/p2-interim-verdict-r2.md`。驱动器三连修:9f33b4e / 9f8c74e / 84df58e。
 
 - 2026-07-28:用户裁定 vs24_long raw prompt 的 r1/r2 推理结果全部作废(不合规:训练 caption 与标准集均为结构化格式)。P2 r3 重建启动:rep50 前 8 case(段 0)× 三臂(off / on-untrained / on-pilot@1000)= 24 个单卡作业(5725-5748)@ c-node08 叠加。驱动器 --prompt-set rep50 支持已入库。
+
+- 2026-07-28:P2 r3 收口——rep50 结构化三臂 24/24 全绿(5739 OOM 补发 5749),metrics 齐,判定 `logs/research/p2-interim-verdict-r3.md`:分布内基线漂移温和(r1/r2 OOD 伪影证实)、未训练记忆仍有害(3/8 冻结 + 1 爆冲)、pilot@1000 无害化达成(8/8 存活,指标持平基线)。预览站重建为 r3-only(24 卡,192MB)。

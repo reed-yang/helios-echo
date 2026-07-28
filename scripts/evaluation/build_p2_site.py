@@ -17,16 +17,17 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 P2_ROOT = REPO / "results" / "p2_interim"
 
+# Only campaigns listed here appear on the site (r1/r2 raw-prompt results
+# were voided by the user on 2026-07-28; rep50 structural protocol replaces them).
 CAMPAIGN_META = {
-    "p2-interim-r1": {
-        "off": ("r1 · off(无记忆基线)", "Distilled 基座,真·无记忆。经典漂移:运动失稳 + 去饱和崩塌。"),
-        "on": ("r1 · on(未训练记忆)", "全新 M₀,未经训练。静态塌缩:motion→0,画面冻结。"),
+    "p2-rep50-r3-off": {
+        "off": ("r3 · off(无记忆基线)", "rep50 结构化 prompt。分布内基线:90s 内漂移温和(对照作废的 raw-prompt 剧烈漂移)。"),
     },
-    "p2-interim-r2-pilot1000": {
-        "on": ("r2 · pilot ckpt-1000(训练后记忆)", "Stage A pilot 语料(2,869 clips)训练 1000 步。饱和度持平,motion 存活。"),
+    "p2-rep50-r3-on-untrained": {
+        "on": ("r3 · on(未训练记忆)", "全新 M₀。3/8 case 静态冻结(motion→0),1 case 饱和度爆冲(+2.61)——未训练记忆仍有害。"),
     },
-    "p2-interim-r2-slice512-500": {
-        "on": ("r2 · slice512 ckpt-500(训练后记忆)", "Stage A 57k-clip 语料训练 500 步。饱和度过冲上行,motion 存活。"),
+    "p2-rep50-r3-on-pilot1000": {
+        "on": ("r3 · on(训练后记忆 pilot@1000)", "Stage A 1000 步。冻结全部消除(8/8 motion 存活),饱和斜率居中(+0.05)。"),
     },
 }
 
@@ -43,6 +44,8 @@ def collect_cards():
         run_id, arm, idx = manifest["run_id"], manifest["arm"], manifest["prompt_index"]
         video = Path(manifest["artifacts"]["video"])
         if not video.exists():
+            continue
+        if run_id not in CAMPAIGN_META or arm not in CAMPAIGN_META.get(run_id, {}):
             continue
         metrics_path = P2_ROOT / run_id / "metrics" / f"{arm}_prompt_{idx:02d}.json"
         metrics = None
