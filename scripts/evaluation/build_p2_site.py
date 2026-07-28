@@ -85,16 +85,27 @@ def window_mean(values, start, end):
 
 
 def prompt_html(prompt):
-    """Structural prompt(s) -> compact display: per-segment <event> texts."""
+    """Structural prompt(s): show <event> summaries, full structural text folded.
+
+    The model receives the FULL structural prompt (header/event/role/Background/
+    style/scene tags, verbatim from the rep50 CSV — see each manifest); the
+    event line shown on the card is a display summary only.
+    """
     if isinstance(prompt, list):
         items = []
         for i, seg in enumerate(prompt):
             m = re.search(r"<event>(.*?)</event>", seg, re.S)
             items.append(f"<li><b>E{i}</b> {html.escape((m.group(1) if m else seg).strip())}</li>")
-        return f"<ol class='events'>{''.join(items)}</ol>"
-    m = re.search(r"<event>(.*?)</event>", prompt, re.S)
-    shown = (m.group(1) if m else prompt).strip()
-    return f"<div class='prompt'>{html.escape(shown)}</div>"
+        summary = f"<ol class='events'>{''.join(items)}</ol>"
+        full = "<hr>".join(html.escape(seg) for seg in prompt)
+    else:
+        m = re.search(r"<event>(.*?)</event>", prompt, re.S)
+        summary = f"<div class='prompt'>{html.escape((m.group(1) if m else prompt).strip())}</div>"
+        full = html.escape(prompt)
+    return (
+        f"{summary}<details class='fullprompt'><summary>完整结构化 prompt(实际输入)</summary>"
+        f"<div class='fulltext'>{full}</div></details>"
+    )
 
 
 def collect_cards(meta):
@@ -188,6 +199,9 @@ def render(cards, page):
   .events {{ margin: 0; padding-left: 18px; font-size: 12.5px; }}
   .events li {{ margin: 1px 0; }}
   .metrics {{ margin-top: 6px; font-size: 12.5px; color: #7ee2a8; }}
+  .fullprompt {{ margin-top: 6px; }}
+  .fullprompt summary {{ font-size: 12px; color: #9ecbff; cursor: pointer; }}
+  .fulltext {{ margin-top: 4px; font-size: 11.5px; color: #a8b0c0; white-space: pre-wrap; max-height: 220px; overflow-y: auto; background: #0f1420; border-radius: 6px; padding: 8px; }}
   .sub {{ margin-top: 6px; font-size: 12px; color: #6b7385; }}
 </style>
 </head>
