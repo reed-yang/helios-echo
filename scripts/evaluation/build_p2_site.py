@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Build a static preview site for P2-interim long-video A/B results.
+"""Build the static preview site for P2 long-video A/B results.
 
-Scans results/p2_interim/*/{on,off}/prompt_*.manifest.json plus the matching
-metrics JSONs, copies videos, and emits a self-contained index.html. Re-run
-after every new campaign; the page lists whatever campaigns exist on disk.
+Two pages share one videos/ directory:
+  index.html  — event-switch protocol (r4): the memory-critical scenario
+  static.html — static-prompt drift protocol (r3), kept as the sub-page
+
+Scans results/p2_interim/<run_id>/<arm>/prompt_*.manifest.json plus matching
+metrics JSONs. Only campaigns listed in a page's meta appear (voided raw-prompt
+campaigns stay off both pages). Re-run after every campaign.
 
 Usage: python scripts/evaluation/build_p2_site.py [--out results/p2_site]
 """
@@ -11,23 +15,48 @@ Usage: python scripts/evaluation/build_p2_site.py [--out results/p2_site]
 import argparse
 import html
 import json
+import re
 import shutil
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 P2_ROOT = REPO / "results" / "p2_interim"
 
-# Only campaigns listed here appear on the site (r1/r2 raw-prompt results
-# were voided by the user on 2026-07-28; rep50 structural protocol replaces them).
-CAMPAIGN_META = {
+R4_META = {
+    "p2-rep50-r4evsw-off": {
+        "off": ("r4 · off(无记忆基线)", "6 事件 × 7 sections 硬切换。切换后旧事件内容离开历史窗口——无记忆时一致性只能靠运气。"),
+    },
+    "p2-rep50-r4evsw-on-untrained": {
+        "on": ("r4 · on(未训练记忆)", "全新 M₀ 参与读写。对照未训练先验在切换场景的行为。"),
+    },
+    "p2-rep50-r4evsw-on-pilot1500": {
+        "on": ("r4 · on(训练后记忆 pilot@1500)", "Stage A 1500 步。记忆是跨切换保持人物/背景一致性的唯一通道——核心价值场景。"),
+    },
+}
+R3_META = {
     "p2-rep50-r3-off": {
-        "off": ("r3 · off(无记忆基线)", "rep50 结构化 prompt。分布内基线:90s 内漂移温和(对照作废的 raw-prompt 剧烈漂移)。"),
+        "off": ("r3 · off(无记忆基线)", "rep50 结构化 prompt,静态单 prompt 90.75s。分布内基线漂移温和。"),
     },
     "p2-rep50-r3-on-untrained": {
-        "on": ("r3 · on(未训练记忆)", "全新 M₀。3/8 case 静态冻结(motion→0),1 case 饱和度爆冲(+2.61)——未训练记忆仍有害。"),
+        "on": ("r3 · on(未训练记忆)", "3/8 case 静态冻结,1 case 饱和爆冲——未训练记忆有害。"),
     },
     "p2-rep50-r3-on-pilot1000": {
-        "on": ("r3 · on(训练后记忆 pilot@1000)", "Stage A 1000 步。冻结全部消除(8/8 motion 存活),饱和斜率居中(+0.05)。"),
+        "on": ("r3 · on(训练后记忆 pilot@1000)", "冻结全部消除(8/8 存活),指标与基线持平。"),
+    },
+}
+
+PAGES = {
+    "index.html": {
+        "meta": R4_META,
+        "title": "Helios-Echo · Event-Switch 评测(6 事件硬切换 · 57.75s)",
+        "note": "记忆主场:每 7 个 section 硬切换事件 prompt,旧事件内容滑出历史窗口后,跨段一致性只能来自演进记忆。三臂同 case 同 seed 配对。",
+        "other": ('static.html', '→ 静态 prompt 漂移协议(r3)子页'),
+    },
+    "static.html": {
+        "meta": R3_META,
+        "title": "Helios-Echo · 静态 Prompt 漂移评测(r3 · 90.75s)",
+        "note": "单 prompt 66 sections 长滚动,度量漂移签名(motion / 饱和度轨迹)。rep50 结构化 prompt(段 0)。",
+        "other": ('index.html', '← 返回 Event-Switch 主页'),
     },
 }
 
@@ -37,49 +66,46 @@ def window_mean(values, start, end):
     return sum(chunk) / len(chunk) if chunk else float("nan")
 
 
-def collect_cards():
+def prompt_html(prompt):
+    """Structural prompt(s) -> compact display: per-segment <event> texts."""
+    if isinstance(prompt, list):
+        items = []
+        for i, seg in enumerate(prompt):
+            m = re.search(r"<event>(.*?)</event>", seg, re.S)
+            items.append(f"<li><b>E{i}</b> {html.escape((m.group(1) if m else seg).strip())}</li>")
+        return f"<ol class='events'>{''.join(items)}</ol>"
+    m = re.search(r"<event>(.*?)</event>", prompt, re.S)
+    shown = (m.group(1) if m else prompt).strip()
+    return f"<div class='prompt'>{html.escape(shown)}</div>"
+
+
+def collect_cards(meta):
     cards = []
     for manifest_path in sorted(P2_ROOT.glob("*/*/prompt_*.manifest.json")):
         manifest = json.loads(manifest_path.read_text())
         run_id, arm, idx = manifest["run_id"], manifest["arm"], manifest["prompt_index"]
+        if run_id not in meta or arm not in meta[run_id]:
+            continue
         video = Path(manifest["artifacts"]["video"])
         if not video.exists():
             continue
-        if run_id not in CAMPAIGN_META or arm not in CAMPAIGN_META.get(run_id, {}):
-            continue
-        metrics_path = P2_ROOT / run_id / "metrics" / f"{arm}_prompt_{idx:02d}.json"
-        metrics = None
-        if metrics_path.exists():
-            m = json.loads(metrics_path.read_text())
-            mot, sat = m["per_chunk"]["motion"], m["per_chunk"]["saturation"]
-            metrics = {
-                "mot_first": window_mean(mot, 0, 10),
-                "mot_last": window_mean(mot, len(mot) - 10, len(mot)),
-                "sat_first": window_mean(sat, 0, 10),
-                "sat_last": window_mean(sat, len(sat) - 10, len(sat)),
-                "sat_slope": m["slopes"]["saturation"]["theil_sen"],
-            }
-        label, blurb = CAMPAIGN_META.get(run_id, {}).get(arm, (f"{run_id} · {arm}", ""))
+        label, blurb = meta[run_id][arm]
         partial = manifest.get("memory_partial")
         cards.append({
-            "order": list(CAMPAIGN_META).index(run_id) if run_id in CAMPAIGN_META else 99,
+            "order": list(meta).index(run_id),
             "run_id": run_id, "arm": arm, "idx": idx,
             "label": label, "blurb": blurb,
             "prompt": manifest["prompt"], "seed": manifest["seed"],
             "created": manifest["created_at_utc"][:16].replace("T", " "),
             "ckpt": Path(partial["path"]).parent.name if partial else "—",
-            "sha": partial["sha256"][:12] if partial else "—",
             "video_src": video,
-            "video_name": f"{run_id.replace('p2-interim-', '')}_{arm}_p{idx}.mp4",
+            "video_name": f"{run_id.replace('p2-rep50-', '').replace('p2-interim-', '')}_{arm}_p{idx}.mp4",
         })
-    cards.sort(key=lambda c: (c["order"], c["arm"] != "off", c["idx"]))
+    cards.sort(key=lambda c: (c["order"], c["idx"]))
     return cards
 
 
-def render(cards):
-    def fmt(v, nd=2):
-        return f"{v:.{nd}f}" if isinstance(v, float) else "—"
-
+def render(cards, page):
     groups = {}
     for c in cards:
         groups.setdefault((c["order"], c["label"], c["blurb"]), []).append(c)
@@ -88,24 +114,25 @@ def render(cards):
     for (_, label, blurb), items in sorted(groups.items(), key=lambda kv: kv[0][0]):
         tiles = []
         for c in items:
-            m = c.get("metrics") or {}
             metric_row = ""
             mp = P2_ROOT / c["run_id"] / "metrics" / f"{c['arm']}_prompt_{c['idx']:02d}.json"
             if mp.exists():
                 mm = json.loads(mp.read_text())
                 mot, sat = mm["per_chunk"]["motion"], mm["per_chunk"]["saturation"]
+                n = len(mot)
                 metric_row = (
-                    f"<div class='metrics'>motion {window_mean(mot,0,10):.2f} → {window_mean(mot,len(mot)-10,len(mot)):.2f}"
-                    f" · 饱和度 {window_mean(sat,0,10):.0f} → {window_mean(sat,len(sat)-10,len(sat)):.0f}"
+                    f"<div class='metrics'>motion {window_mean(mot,0,10):.2f} → {window_mean(mot,n-10,n):.2f}"
+                    f" · 饱和度 {window_mean(sat,0,10):.0f} → {window_mean(sat,n-10,n):.0f}"
                     f" · 斜率 {mm['slopes']['saturation']['theil_sen']:+.2f}</div>"
                 )
             tiles.append(f"""
       <div class="card">
         <video controls preload="metadata" src="videos/{c['video_name']}"></video>
         <div class="meta">
-          <div class="prompt">P{c['idx']} · {html.escape(c['prompt'])}</div>
+          <div class="case">case {c['idx']}</div>
+          {prompt_html(c['prompt'])}
           {metric_row}
-          <div class="sub">seed {c['seed']} · ckpt {html.escape(c['ckpt'])} · sha {c['sha']} · {c['created']} UTC</div>
+          <div class="sub">seed {c['seed']} · ckpt {html.escape(c['ckpt'])} · {c['created']} UTC</div>
         </div>
       </div>""")
         sections.append(f"""
@@ -116,19 +143,21 @@ def render(cards):
       </div>
     </section>""")
 
+    other_href, other_text = page["other"]
     return f"""<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Helios-Echo · P2 长视频漂移评测预览</title>
+<title>{html.escape(page['title'])}</title>
 <style>
   :root {{ color-scheme: dark; }}
   body {{ margin: 0; background: #0d1017; color: #e6e9ef; font: 15px/1.6 -apple-system, "Segoe UI", "PingFang SC", sans-serif; }}
-  header {{ padding: 28px 32px 8px; border-bottom: 1px solid #1f2430; }}
+  header {{ padding: 28px 32px 12px; border-bottom: 1px solid #1f2430; }}
   h1 {{ margin: 0 0 6px; font-size: 21px; }}
-  .note {{ color: #8b93a5; font-size: 13px; }}
+  .note {{ color: #8b93a5; font-size: 13px; max-width: 900px; }}
+  .navlink {{ display: inline-block; margin-top: 8px; color: #9ecbff; font-size: 13px; text-decoration: none; }}
   section {{ padding: 18px 32px; }}
   h2 {{ font-size: 17px; margin: 8px 0 2px; color: #9ecbff; }}
   .blurb {{ color: #8b93a5; margin: 2px 0 12px; font-size: 13px; }}
@@ -136,15 +165,19 @@ def render(cards):
   .card {{ background: #141926; border: 1px solid #222a3a; border-radius: 10px; overflow: hidden; }}
   video {{ width: 100%; display: block; background: #000; aspect-ratio: 640/384; }}
   .meta {{ padding: 10px 14px 12px; }}
+  .case {{ color: #d9b96b; font-size: 12px; margin-bottom: 4px; }}
   .prompt {{ font-size: 13.5px; }}
+  .events {{ margin: 0; padding-left: 18px; font-size: 12.5px; }}
+  .events li {{ margin: 1px 0; }}
   .metrics {{ margin-top: 6px; font-size: 12.5px; color: #7ee2a8; }}
   .sub {{ margin-top: 6px; font-size: 12px; color: #6b7385; }}
 </style>
 </head>
 <body>
 <header>
-  <h1>Helios-Echo · P2-interim 长视频漂移评测(90.75s / 66 sections / seed 配对)</h1>
-  <div class="note">四臂对照:off 基线漂移 → on 未训练记忆静态塌缩 → Stage A 训练后记忆(两 ckpt)。指标为逐 chunk 首末 10 段均值与 Theil-Sen 斜率。</div>
+  <h1>{html.escape(page['title'])}</h1>
+  <div class="note">{html.escape(page['note'])}</div>
+  <a class="navlink" href="{other_href}">{html.escape(other_text)}</a>
 </header>
 {''.join(sections)}
 <footer style="padding:20px 32px;color:#4c5364;font-size:12px">generated by scripts/evaluation/build_p2_site.py · helios-echo</footer>
@@ -158,18 +191,19 @@ def main():
     parser.add_argument("--out", type=Path, default=REPO / "results" / "p2_site")
     args = parser.parse_args()
 
-    cards = collect_cards()
-    if not cards:
-        raise SystemExit("no manifests found under results/p2_interim")
     videos_dir = args.out / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
-    for c in cards:
-        dst = videos_dir / c["video_name"]
-        if not dst.exists() or dst.stat().st_size != c["video_src"].stat().st_size:
-            shutil.copy2(c["video_src"], dst)
-    (args.out / "index.html").write_text(render(cards))
-    total = sum(f.stat().st_size for f in videos_dir.iterdir()) / 1e6
-    print(f"SITE_OK cards={len(cards)} out={args.out} videos={total:.0f}MB")
+    total_cards = 0
+    for page_name, page in PAGES.items():
+        cards = collect_cards(page["meta"])
+        for c in cards:
+            dst = videos_dir / c["video_name"]
+            if not dst.exists() or dst.stat().st_size != c["video_src"].stat().st_size:
+                shutil.copy2(c["video_src"], dst)
+        (args.out / page_name).write_text(render(cards, page))
+        total_cards += len(cards)
+        print(f"PAGE {page_name}: {len(cards)} cards")
+    print(f"SITE_OK pages={len(PAGES)} cards={total_cards}")
 
 
 if __name__ == "__main__":

@@ -174,3 +174,5 @@
 - 2026-07-28:用户裁定 vs24_long raw prompt 的 r1/r2 推理结果全部作废(不合规:训练 caption 与标准集均为结构化格式)。P2 r3 重建启动:rep50 前 8 case(段 0)× 三臂(off / on-untrained / on-pilot@1000)= 24 个单卡作业(5725-5748)@ c-node08 叠加。驱动器 --prompt-set rep50 支持已入库。
 
 - 2026-07-28:P2 r3 收口——rep50 结构化三臂 24/24 全绿(5739 OOM 补发 5749),metrics 齐,判定 `logs/research/p2-interim-verdict-r3.md`:分布内基线漂移温和(r1/r2 OOD 伪影证实)、未训练记忆仍有害(3/8 冻结 + 1 爆冲)、pilot@1000 无害化达成(8/8 存活,指标持平基线)。预览站重建为 r3-only(24 卡,192MB)。
+
+- 2026-07-28:P2 r4 Event-Switch 收口——rep50 全 6 段硬切换三臂 24/24 零失败(14 卡双节点一波半),metrics 齐。判定 `logs/research/p2-eventswitch-verdict-r4.md`:切换场景下未训练记忆病理转为系统性饱和爆冲(+1.29),pilot@1500 完全压制贴合基线(−0.30);冻结在切换场景消失(三臂 0/8)。预览站改版:Event-Switch 主页 + r3 静态子页。
