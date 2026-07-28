@@ -16,6 +16,7 @@ ARM="$1"
 PIDX="$2"
 RUNID="$3"
 PARTIAL="${4:-none}"
+SECTIONS="${5:-66}"
 
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
@@ -37,7 +38,7 @@ fi
 export CUDA_VISIBLE_DEVICES="$goodidx"
 echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 
-ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts 8)
+ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts 8 --sections "$SECTIONS")
 if [ "$PARTIAL" != "none" ]; then
   ARGS+=(--memory-partial "$PARTIAL")
 fi
