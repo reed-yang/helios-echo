@@ -170,3 +170,5 @@
 - 2026-07-27 晚(压缩后):slice512(job 5693)checkpoint-500 落盘并通过结构不变量验证 —— LoRA 814 tensors 零 memory 键泄漏;transformer_partial.pth 84 键(evolving 38 + patch 6 + blocks 40);query_state 缺席;evolving 权重全有限。与 pilot ckpt-500 结构逐项一致(57,741-clip 语料下复现)。9.0G。
 
 - 2026-07-28 凌晨:P2-interim r2 收口——4 支训练后记忆长视频(jobs 5718/5722-5724,90.75s each,13.7 min/臂)全绿 + metrics 三方对照完成。**核心结果:静态塌缩消除(motion 全程存活 vs 未训练臂 →0.02)、去饱和漂移翻转(sat 斜率 −1.2~−2.4 → ≈0~+0.85)**。判定:`logs/research/p2-interim-verdict-r2.md`。驱动器三连修:9f33b4e / 9f8c74e / 84df58e。
+
+- 2026-07-28:用户裁定 vs24_long raw prompt 的 r1/r2 推理结果全部作废(不合规:训练 caption 与标准集均为结构化格式)。P2 r3 重建启动:rep50 前 8 case(段 0)× 三臂(off / on-untrained / on-pilot@1000)= 24 个单卡作业(5725-5748)@ c-node08 叠加。驱动器 --prompt-set rep50 支持已入库。

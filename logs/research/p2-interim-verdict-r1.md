@@ -1,5 +1,7 @@
 # P2-Interim Scaffold Verdict — R1
 
+> **【作废 VOID,2026-07-28 用户裁定】**:本判定基于 vs24_long raw 裸句 prompt,不符合结构化改写规范;结果作废,由 rep50 结构化三臂重建取代。
+
 **Conclusion: PASS WITH CAVEAT for scaffold acceptance; NOT effect-ready.** The full Distilled plumbing/regression gate completed: all four 90.75 s videos are finite, all four Task-1 metric jobs completed with exit code 0, every JSON is schema-complete and finite with 66 chunks / 65 boundaries, and both memory-on manifests record 64 writes with queue residue `[64, 65]`. The overhead item is inherited from the clean rollout-smoke run2 measurement (+5.5%, within the 12% limit), because this run's four-way c-node08 contention invalidates its own timing comparison.
 
 The caveat is a material A/B parity alarm, not an effect claim: memory-on mean motion is only 3.6% and 5.0% of memory-off for prompts 0 and 1 (about 28× and 20× lower). Fresh untrained M₀ was expected to produce approximately no A/B difference. The scaffold is proven executable and observable, but this divergence must be investigated before these R1 curves are used as a Stage B/C effect reference.
