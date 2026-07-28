@@ -166,3 +166,7 @@
 - 5693(slice512,57,741-clip 快照)@ mc-node01 RUNNING;5694(pilot 自 ckpt-500 resume)@ c-node05 RUNNING(节点 "Kill task failed" drain 按标准程序 resume 后派发);均 sbatch + 前哨检查,零警报。
 - 全量同步 ~71k/168,431 @ ~34 MiB/s(transfers 并发实测 8/32/64 = 26/34/33,出口硬顶),ETA 明晨;完成自动失效 cache。
 - 数据源已切 07-15 散文件备份(逐字节一致实证);checkpoint §六/§七 补录晚间全部事件与实验速览。
+
+- 2026-07-27 晚(压缩后):slice512(job 5693)checkpoint-500 落盘并通过结构不变量验证 —— LoRA 814 tensors 零 memory 键泄漏;transformer_partial.pth 84 键(evolving 38 + patch 6 + blocks 40);query_state 缺席;evolving 权重全有限。与 pilot ckpt-500 结构逐项一致(57,741-clip 语料下复现)。9.0G。
+
+- 2026-07-28 凌晨:P2-interim r2 收口——4 支训练后记忆长视频(jobs 5718/5722-5724,90.75s each,13.7 min/臂)全绿 + metrics 三方对照完成。**核心结果:静态塌缩消除(motion 全程存活 vs 未训练臂 →0.02)、去饱和漂移翻转(sat 斜率 −1.2~−2.4 → ≈0~+0.85)**。判定:`logs/research/p2-interim-verdict-r2.md`。驱动器三连修:9f33b4e / 9f8c74e / 84df58e。

@@ -92,3 +92,10 @@
 - **修复方向**:stage2_sample 镜像条件返回契约(仅 capture_last_step=True 时三元组;捕获 = 最后 stage 最后调度步 + 该步 σ),非捕获调用方零改动。
 
 - **整节点内存记账再次实证(2026-07-27,c-node08)**:4 个单卡 A/B 作业不带 `--mem` 提交 → 首作业按 DefMemPerNode=UNLIMITED 吃满节点内存记账,其余 3 个 PEND(Resources/ReqNodeNotAvail),8 卡节点被 1 卡作业锁死;显式 `--mem=200G --cpus-per-task=16` 重发后 4 作业即刻并行(5677-5680)。job_submit.lua 默认配额方案的直接依据。另:后台包装脚本不 `wait` 会孤儿化 srun(仍存活但失去完成通知),包装必须 `wait`。
+
+## 2026-07-27 晚:c-node08 泄漏 Prohibited GPU 导致 CVD 错位(jobs 5719-5721 三连败根因)
+
+**结论**:c-node08 有一块 Prohibited 计算模式的卡(nvidia-smi 显示 4 MiB 常驻)不在 Slurm gres 管辖内,却会漏进每个作业的 device cgroup;cgroup 内重编号后它常占 index 0,而 Slurm 一律设 `CUDA_VISIBLE_DEVICES=0`,于是分到物理 GPU 2/3/4 的作业实际全指向坏卡 → `cudaErrorDevicesUnavailable`(5719/5720/5721,EXIT_CODE=1)。分到物理 GPU 0 的 5718 因坏卡排在其后而幸免,并证明与 xiangbo 同卡叠加(41.7+50=91.8GB)完全可行。
+**修复**:sbatch 内按 `compute_mode==Default` 重映射 CVD(`84df58e`),补发 5722-5724 全部 `REMAPPED cvd=1` 起跑。
+**附带事实**:mc-node02 也有一块同签名 Prohibited 卡(GPU5, 4 MiB)——疑似逐节点屏蔽坏卡的管理惯例;scancel 在 c-node08 可触发 "Kill task failed" 自动 drain(本日第二次,resume 程序同 c-node05)。
+**排除**:非 VRAM 不足(余量 ~99GB)、非 Exclusive 模式(实测 Default)、非 xiangbo 的 Slurm 占用(其任务在 Slurm 外,账面 idle)。
