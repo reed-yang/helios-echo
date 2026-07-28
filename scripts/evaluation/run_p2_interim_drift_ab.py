@@ -7,6 +7,7 @@ matching ``on`` and ``off`` invocations with the same ``--run-id``,
 """
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -25,6 +26,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DISTILLED = Path("/mnt/beegfs/yuheng/Helios/BestWishYSH/Helios-Distilled")
 VS24_CONFIG = PROJECT_ROOT / "tools/long_video_eval/configs/vs24_long.json"
+REP50_DIR = Path("/mnt/beegfs/xiangbo/helios_runs/eval_prompts_rep50")
+REP50_FIRST_CASE = 3000
 RESULTS_ROOT = PROJECT_ROOT / "results/p2_interim"
 MEMORY_KWARGS = {
     "is_enable_evolving_memory": True,
@@ -84,9 +87,17 @@ def parse_args(argv=None):
     parser.add_argument(
         "--num-prompts",
         type=int,
-        choices=(2, 3),
         default=2,
-        help="number of leading vs24_long prompts in this A/B campaign",
+        help="number of leading prompts in this A/B campaign",
+    )
+    parser.add_argument(
+        "--prompt-set",
+        choices=("vs24_long", "rep50"),
+        default="vs24_long",
+        help=(
+            "prompt source: vs24_long = raw sentences (legacy r1/r2 protocol); "
+            "rep50 = structurally rewritten standard cases (segment 0 of each case CSV)"
+        ),
     )
     parser.add_argument("--base-seed", type=int, default=7)
     parser.add_argument(
@@ -148,6 +159,25 @@ def load_vs24_prompts(num_prompts):
     if len(prompts) < num_prompts:
         raise ValueError(f"{prompt_path} contains {len(prompts)} prompts; need {num_prompts}")
     return prompt_path, prompts[:num_prompts]
+
+
+def load_rep50_prompts(num_prompts):
+    """Segment 0 of rep50 standard cases 3000..3000+num-1 (structural rewrite).
+
+    Each case CSV holds a multi-segment event sequence sharing one identity and
+    background; the single-prompt drift protocol uses the first segment only.
+    Returns per-index source paths so each manifest can hash its exact case file.
+    """
+    sources, prompts = [], []
+    for case in range(REP50_FIRST_CASE, REP50_FIRST_CASE + num_prompts):
+        path = REP50_DIR / f"{case}.csv"
+        with path.open(newline="") as handle:
+            rows = [row for row in csv.DictReader(handle) if row["prompt_index"] == "0"]
+        if len(rows) != 1:
+            raise ValueError(f"{path} has {len(rows)} rows with prompt_index=0; expected exactly 1")
+        sources.append(path)
+        prompts.append(rows[0]["prompt"].strip())
+    return sources, prompts
 
 
 def paired_seed(base_seed, prompt_index):
@@ -551,6 +581,9 @@ def write_json_atomic(path, payload):
 
 
 def run(args, run_id, prompt_path, prompts):
+    if isinstance(prompt_path, list):
+        # rep50: one source CSV per prompt index (manifest hashes the exact case file).
+        prompt_path = prompt_path[args.prompt_index]
     if args.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
@@ -698,6 +731,7 @@ def run(args, run_id, prompt_path, prompts):
         "enable_evolving_memory": args.arm == "on",
         "prompt_index": args.prompt_index,
         "prompt": entry["prompt"],
+        "prompt_set": args.prompt_set,
         "prompt_source": str(prompt_path),
         "prompt_source_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
         "base_seed": args.base_seed,
@@ -736,7 +770,11 @@ def run(args, run_id, prompt_path, prompts):
 def main(argv=None):
     args = parse_args(argv)
     run_id = validate_run_id(args.run_id or utc_run_id())
-    prompt_path, prompts = load_vs24_prompts(args.num_prompts)
+    if args.prompt_set == "rep50":
+        # Per-index case files; run() indexes with the rollout's prompt_index.
+        prompt_path, prompts = load_rep50_prompts(args.num_prompts)
+    else:
+        prompt_path, prompts = load_vs24_prompts(args.num_prompts)
     entries = resolved_entries(args, run_id, prompts)
     if args.dry_run:
         print(
@@ -744,7 +782,10 @@ def main(argv=None):
                 {
                     "dry_run": True,
                     "run_id": run_id,
-                    "prompt_source": str(prompt_path),
+                    "prompt_set": args.prompt_set,
+                    "prompt_source": (
+                        str(prompt_path[0].parent) if isinstance(prompt_path, list) else str(prompt_path)
+                    ),
                     "prompt_count": args.num_prompts,
                     "regime": generation_regime(args.sections),
                     "config_digest_sha256": canonical_digest(
