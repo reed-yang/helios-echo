@@ -99,6 +99,22 @@ def parse_args(argv=None):
             "rep50 = structurally rewritten standard cases (segment 0 of each case CSV)"
         ),
     )
+    parser.add_argument(
+        "--segments",
+        type=int,
+        default=1,
+        help=(
+            "event segments per case (rep50 only). >1 enables per-section prompt "
+            "switching: segments consume case CSV rows prompt_index 0..segments-1 "
+            "with a hard switch every --sections-per-segment sections"
+        ),
+    )
+    parser.add_argument(
+        "--sections-per-segment",
+        type=int,
+        default=7,
+        help="sections each event segment holds before the hard switch (team eventswitch norm: 7)",
+    )
     parser.add_argument("--base-seed", type=int, default=7)
     parser.add_argument(
         "--memory-partial",
@@ -139,6 +155,13 @@ def parse_args(argv=None):
             parser.error("--memory-partial is only valid with --arm on")
         if not args.memory_partial.is_file():
             parser.error(f"--memory-partial not found: {args.memory_partial}")
+    if args.segments < 1:
+        parser.error("--segments must be >= 1")
+    if args.segments > 1:
+        if args.prompt_set != "rep50":
+            parser.error("--segments > 1 requires --prompt-set rep50")
+        # Event-switch protocol derives the rollout length from the schedule.
+        args.sections = args.segments * args.sections_per_segment
     return args
 
 
@@ -161,22 +184,28 @@ def load_vs24_prompts(num_prompts):
     return prompt_path, prompts[:num_prompts]
 
 
-def load_rep50_prompts(num_prompts):
-    """Segment 0 of rep50 standard cases 3000..3000+num-1 (structural rewrite).
+def load_rep50_prompts(num_prompts, segments=1):
+    """rep50 standard cases 3000..3000+num-1 (structural rewrite).
 
     Each case CSV holds a multi-segment event sequence sharing one identity and
-    background; the single-prompt drift protocol uses the first segment only.
-    Returns per-index source paths so each manifest can hash its exact case file.
+    background. segments=1 keeps the single-prompt drift protocol (first segment
+    only, prompt is a string); segments>1 returns an ordered list of segment
+    prompts per case for the event-switch protocol. Returns per-index source
+    paths so each manifest can hash its exact case file.
     """
     sources, prompts = [], []
     for case in range(REP50_FIRST_CASE, REP50_FIRST_CASE + num_prompts):
         path = REP50_DIR / f"{case}.csv"
         with path.open(newline="") as handle:
-            rows = [row for row in csv.DictReader(handle) if row["prompt_index"] == "0"]
-        if len(rows) != 1:
-            raise ValueError(f"{path} has {len(rows)} rows with prompt_index=0; expected exactly 1")
+            by_index = {row["prompt_index"]: row["prompt"].strip() for row in csv.DictReader(handle)}
+        missing = [i for i in range(segments) if str(i) not in by_index]
+        if missing:
+            raise ValueError(f"{path} lacks prompt_index rows {missing}; case has {sorted(by_index)}")
         sources.append(path)
-        prompts.append(rows[0]["prompt"].strip())
+        if segments == 1:
+            prompts.append(by_index["0"])
+        else:
+            prompts.append([by_index[str(i)] for i in range(segments)])
     return sources, prompts
 
 
@@ -613,6 +642,11 @@ def run(args, run_id, prompt_path, prompts):
     # --memory-partial keep the exact r1 config digest.
     if memory_partial_info is not None:
         digest_payload["memory_partial_sha256"] = memory_partial_info["sha256"]
+    if args.segments > 1:
+        digest_payload["event_switch"] = {
+            "segments": args.segments,
+            "sections_per_segment": args.sections_per_segment,
+        }
     config_digest = canonical_digest(digest_payload)
     milestones = Milestones()
     timings = {}
@@ -662,6 +696,17 @@ def run(args, run_id, prompt_path, prompts):
     generator = torch.Generator(device="cuda").manual_seed(seed)
     rollout_started = time.perf_counter()
     try:
+        # Event-switch protocol: the pipeline's interactive path selects one
+        # segment's embeds per section; interpolation_steps=0 is a hard switch
+        # (the boundary-interpolation branch is never entered). Text encoding
+        # consumes no RNG, so arm pairing is unaffected.
+        interactive_kwargs = {}
+        if args.segments > 1:
+            interactive_kwargs = dict(
+                use_interpolate_prompt=True,
+                interpolate_time_list=[args.sections_per_segment] * args.segments,
+                interpolation_steps=0,
+            )
         output = pipe(
             prompt=entry["prompt"],
             height=REGIME["height"],
@@ -680,6 +725,7 @@ def run(args, run_id, prompt_path, prompts):
             generator=generator,
             callback_on_step_end=section_callback,
             callback_on_step_end_tensor_inputs=["latents"],
+            **interactive_kwargs,
         )
     finally:
         if hook is not None:
@@ -732,6 +778,8 @@ def run(args, run_id, prompt_path, prompts):
         "prompt_index": args.prompt_index,
         "prompt": entry["prompt"],
         "prompt_set": args.prompt_set,
+        "segments": args.segments,
+        "sections_per_segment": args.sections_per_segment if args.segments > 1 else None,
         "prompt_source": str(prompt_path),
         "prompt_source_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
         "base_seed": args.base_seed,
@@ -772,7 +820,7 @@ def main(argv=None):
     run_id = validate_run_id(args.run_id or utc_run_id())
     if args.prompt_set == "rep50":
         # Per-index case files; run() indexes with the rollout's prompt_index.
-        prompt_path, prompts = load_rep50_prompts(args.num_prompts)
+        prompt_path, prompts = load_rep50_prompts(args.num_prompts, segments=args.segments)
     else:
         prompt_path, prompts = load_vs24_prompts(args.num_prompts)
     entries = resolved_entries(args, run_id, prompts)
