@@ -54,3 +54,7 @@
 1. 视觉 QC 4 支视频(尤其 pilot p1 末段)。
 2. 双训练 run 到 4000 步后,以终态 ckpt 重跑本协议(可加 prompt/种子扩 n)= Stage A 正式验收。
 3. slice512 过冲现象随训练步数的演化值得追踪(每 1000 步一测,13.7 min/臂成本可承受)。
+
+## 补充 caveat(2026-07-28,用户质询后)
+
+本判定所有 prompt 为 vs24_long raw 裸句,**不符合团队"推理 prompt 需结构化改写"规范**(训练 caption 与 rep50 标准集均为 `<header>/<event>/<role>/<Background>` 结构体)。三臂同 prompt 同 seed ⇒ 相对结论(塌缩消除/斜率翻转)有效;绝对量级与正式验收需在 `eval_prompts_rep50`(50 结构化 case)上重建三臂。详见 findings 2026-07-28 条目。

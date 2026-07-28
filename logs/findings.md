@@ -99,3 +99,8 @@
 **修复**:sbatch 内按 `compute_mode==Default` 重映射 CVD(`84df58e`),补发 5722-5724 全部 `REMAPPED cvd=1` 起跑。
 **附带事实**:mc-node02 也有一块同签名 Prohibited 卡(GPU5, 4 MiB)——疑似逐节点屏蔽坏卡的管理惯例;scancel 在 c-node08 可触发 "Kill task failed" 自动 drain(本日第二次,resume 程序同 c-node05)。
 **排除**:非 VRAM 不足(余量 ~99GB)、非 Exclusive 模式(实测 Default)、非 xiangbo 的 Slurm 占用(其任务在 Slurm 外,账面 idle)。
+
+## 2026-07-28:P2 协议 prompt 合规性缺陷(用户质询证实)+ 基座谱系澄清
+
+**结论 1(prompt 不合规)**:训练 caption 与团队标准推理集均为结构化格式(`<header>/<event>/<role>/<Background>`,见 captions.jsonl 首条与 `eval_prompts_rep50/3000.csv`),而 P2 r1/r2 所用 prompt 为 `eval_prompts_vs24_long` test split 的 **raw 裸句列**(eval_norm/long/prompt.txt,20 条)——r1 计划期因 2178 帧参考时长精确匹配 66-section 协议而选中,未执行结构化改写规范,r2 为保种子/prompt 配对继承之。**影响**:三臂同 prompt 同 seed,内部相对结论(静态塌缩消除、饱和斜率翻转)仍有效;但全部臂处于 backbone prompt-OOD 状态,绝对漂移量级不作数,正式 Stage A 验收必须换 `eval_prompts_rep50`(实测 50 个结构化 case,id 3000+)。
+**结论 2(基座谱系)**:Stage A 基座 = Helios-Base + `stage1_lora_cfr_368_correct/checkpoint-19500` LoRA 合并(设计 D8/主线协调明文冻结,保 C2 配对可比);用户提及的 27500 属 `stage1_lora_reweight_368`(同样自 _correct@19500 分叉的 rwtag 重加权 campaign,现已完结于 **checkpoint-31140-final**)。迁基座 = 设计变更,候选时机为 Stage B 选基或 Stage A-v2。
