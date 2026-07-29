@@ -58,6 +58,9 @@ R3_META = {
     "p2-rep50-r5long-on-pilot4000": {
         "on": ("r5 ★ 8 分钟 · on(pilot@4000 终态记忆)", "同 case 同 seed 的记忆臂:347 次记忆写入(迄今最长状态机演化)。对照观察 8 分钟尺度的画面保持。"),
     },
+    "p2-rep50-r5long-on-full8000": {
+        "on": ("r5 ◆ 8 分钟 · on(full@8000,全量语料)", "多样性谱系的 8 分钟回复力检验:与上两组同 case 同 seed 配对。"),
+    },
     "p2-rep50-r3-off": {
         "off": ("r3 · off(无记忆基线)", "rep50 结构化 prompt,静态单 prompt 90.75s。分布内基线漂移温和。"),
     },
@@ -78,14 +81,19 @@ R3_META = {
 PAGES = {
     "index.html": {
         "meta": R4_META,
+        # Auto-discover any compliant campaign of this protocol family so new
+        # checkpoints appear on rebuild without manual registration. Voided
+        # raw-prompt campaigns (p2-interim-*, p2-dress) never match.
+        "auto": lambda rid: rid.startswith("p2-rep50-") and "r4evsw" in rid,
         "title": "Helios-Echo · Event-Switch 评测(6 事件硬切换 · 57.75s)",
         "note": "记忆主场:每 7 个 section 硬切换事件 prompt,旧事件内容滑出历史窗口后,跨段一致性只能来自演进记忆。三臂同 case 同 seed 配对。",
         "other": ('static.html', '→ 静态 prompt 漂移协议(r3)子页'),
     },
     "static.html": {
         "meta": R3_META,
-        "title": "Helios-Echo · 静态 Prompt 漂移评测(r3 · 90.75s)",
-        "note": "单 prompt 66 sections 长滚动,度量漂移签名(motion / 饱和度轨迹)。rep50 结构化 prompt(段 0)。",
+        "auto": lambda rid: rid.startswith("p2-rep50-") and "r4evsw" not in rid,
+        "title": "Helios-Echo · 静态 Prompt 漂移评测(r3 · 90.75s / r5 · 8min)",
+        "note": "单 prompt 长滚动,度量漂移签名(motion / 饱和度轨迹)。rep50 结构化 prompt(段 0)。",
         "other": ('index.html', '← 返回 Event-Switch 主页'),
     },
 }
@@ -120,20 +128,27 @@ def prompt_html(prompt):
     )
 
 
-def collect_cards(meta):
+def collect_cards(meta, auto=None):
     cards = []
     for manifest_path in sorted(P2_ROOT.glob("*/*/prompt_*.manifest.json")):
         manifest = json.loads(manifest_path.read_text())
         run_id, arm, idx = manifest["run_id"], manifest["arm"], manifest["prompt_index"]
-        if run_id not in meta or arm not in meta[run_id]:
+        if run_id in meta and arm in meta[run_id]:
+            label, blurb = meta[run_id][arm]
+        elif auto is not None and auto(run_id):
+            label = f"{run_id.replace('p2-rep50-', '')} · {arm}(自动收录)"
+            blurb = "新 campaign,自动上站;判读见对应 verdict 文档。"
+        else:
             continue
         video = Path(manifest["artifacts"]["video"])
         if not video.exists():
             continue
-        label, blurb = meta[run_id][arm]
         partial = manifest.get("memory_partial")
+        # Curated campaigns keep their meta order; auto-discovered ones go last,
+        # ordered by run_id so they group deterministically.
+        order = list(meta).index(run_id) if run_id in meta else 500
         cards.append({
-            "order": list(meta).index(run_id),
+            "order": order,
             "run_id": run_id, "arm": arm, "idx": idx,
             "label": label, "blurb": blurb,
             "prompt": manifest["prompt"], "seed": manifest["seed"],
@@ -142,7 +157,7 @@ def collect_cards(meta):
             "video_src": video,
             "video_name": f"{run_id.replace('p2-rep50-', '').replace('p2-interim-', '')}_{arm}_p{idx}.mp4",
         })
-    cards.sort(key=lambda c: (c["order"], c["idx"]))
+    cards.sort(key=lambda c: (c["order"], c["run_id"], c["idx"]))
     return cards
 
 
@@ -239,7 +254,7 @@ def main():
     videos_dir.mkdir(parents=True, exist_ok=True)
     total_cards = 0
     for page_name, page in PAGES.items():
-        cards = collect_cards(page["meta"])
+        cards = collect_cards(page["meta"], auto=page.get("auto"))
         for c in cards:
             dst = videos_dir / c["video_name"]
             if not dst.exists() or dst.stat().st_size != c["video_src"].stat().st_size:
