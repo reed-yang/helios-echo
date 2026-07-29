@@ -44,6 +44,9 @@ R4_META = {
     "p2-rep50-r4evsw-on-slice512-4000": {
         "on": ("r4★ · on(slice512@4000,训练终态)", "Stage A 终态验收:57k 语料完整 4000 步(~2.2 epochs)。"),
     },
+    "p2-rep50-r4evsw-on-full4000": {
+        "on": ("r4◆ · on(full@4000,全量语料 ~0.76ep)", "168k 全量语料 4000 步:斜率 −0.19 优于基线与 slice512——语料多样性可部分替代重复暴露。"),
+    },
 }
 R3_META = {
     "p2-rep50-r5long-off": {
