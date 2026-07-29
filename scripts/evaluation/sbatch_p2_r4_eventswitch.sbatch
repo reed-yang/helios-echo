@@ -9,12 +9,16 @@
 #SBATCH --output=/mnt/beegfs/siyuan/workspace/helios-echo/results/p2_interim/logs/%x_%j.log
 
 # P2 r4: rep50 event-switch protocol — 6 segments x 7 sections, hard switch.
-# Usage: sbatch sbatch_p2_r4_eventswitch.sbatch <arm> <prompt_index> <run_id> [memory_partial.pth|none]
+# Usage: sbatch sbatch_p2_r4_eventswitch.sbatch <arm> <prompt_index> <run_id> \
+#          [memory_partial.pth|none] [num_prompts]
+# num_prompts widens the rep50 case window: the default 8 keeps every existing
+# campaign identical; 16 exposes cases 8-15 for held-out generalization.
 set -uo pipefail
 ARM="$1"
 PIDX="$2"
 RUNID="$3"
 PARTIAL="${4:-none}"
+NUMP="${5:-8}"
 
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
@@ -50,7 +54,7 @@ export CUDA_VISIBLE_DEVICES="$goodidx"
 echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 
 ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" \
-      --prompt-set rep50 --num-prompts 8 --segments 6 --sections-per-segment 7)
+      --prompt-set rep50 --num-prompts "$NUMP" --segments 6 --sections-per-segment 7)
 if [ "$PARTIAL" != "none" ]; then
   ARGS+=(--memory-partial "$PARTIAL")
 fi
