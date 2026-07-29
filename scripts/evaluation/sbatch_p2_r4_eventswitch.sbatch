@@ -22,6 +22,21 @@ ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
 echo "JOB=$SLURM_JOB_ID node=$(hostname) cvd=${CUDA_VISIBLE_DEVICES:-unset} arm=$ARM pidx=$PIDX runid=$RUNID partial=$PARTIAL"
 /usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader || true
 
+# pinghe's runs live outside Slurm, so sinfo reports their whole nodes as idle
+# and their ~86GB of free VRAM per H200 passes the headroom check below. The
+# --nodelist pin is not a guarantee (a -w override reaches a different node),
+# so refuse the node explicitly rather than stacking on them.
+owners=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader \
+  | /usr/bin/xargs -r -n1 /bin/ps -o user= -p 2>/dev/null | /usr/bin/sort -u | /usr/bin/tr '\n' ',')
+case ",$owners" in
+  *,pinghe,*)
+    echo "FOREIGN_OWNER_REFUSED host=$(hostname) owners=$owners"
+    echo "EXIT_CODE=44"
+    exit 44
+    ;;
+esac
+echo "GPU_OWNERS=$owners"
+
 # Pick the Default-mode visible GPU with the most free memory (leaked
 # Prohibited cards + colleagues' dynamically growing processes; see findings).
 goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
