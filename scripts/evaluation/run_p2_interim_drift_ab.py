@@ -126,6 +126,33 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--history-projection",
+        choices=("none", "quantize", "codebook", "renorm"),
+        default="none",
+        help=(
+            "training-free anti-drift projection of each section's history tiers, applied "
+            "before patchify: quantize = uniform grid dead zone, codebook = FramePack-style "
+            "nearest-centroid discretization, renorm = per-channel affine match to a frozen reference"
+        ),
+    )
+    parser.add_argument(
+        "--history-projection-step",
+        type=float,
+        default=0.0,
+        help="grid step for --history-projection quantize (normalized latent units)",
+    )
+    parser.add_argument(
+        "--history-projection-alpha",
+        type=float,
+        default=1.0,
+        help="projection strength; 0 is a no-op, 1 is the full projection",
+    )
+    parser.add_argument(
+        "--history-projection-codebook",
+        type=Path,
+        help="(K, C) codebook .pt from fit_history_codebook.py, required by --history-projection codebook",
+    )
+    parser.add_argument(
         "--run-id",
         help="shared A/B run identifier (pass the same value to parallel processes)",
     )
@@ -146,6 +173,12 @@ def parse_args(argv=None):
         parser.error("--sections must be positive")
     if args.prompt_index is not None and not 0 <= args.prompt_index < args.num_prompts:
         parser.error("--prompt-index must be within [0, --num-prompts)")
+    if args.history_projection == "quantize" and not args.history_projection_step > 0:
+        parser.error("--history-projection quantize needs --history-projection-step > 0")
+    if args.history_projection == "codebook" and args.history_projection_codebook is None:
+        parser.error("--history-projection codebook needs --history-projection-codebook")
+    if not 0.0 <= args.history_projection_alpha <= 1.0:
+        parser.error("--history-projection-alpha must be within [0, 1]")
     if not args.dry_run and (args.prompt_index is None or args.arm is None):
         parser.error("a real rollout requires both --prompt-index and --arm")
     if not args.dry_run and args.run_id is None:
@@ -217,6 +250,57 @@ def paired_seed(base_seed, prompt_index):
 def canonical_digest(value):
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def sha256_file(path):
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 24), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def history_projection_config(args):
+    """Projection settings as recorded in both the digest and the manifest,
+    or None when the run uses no projection."""
+    if args.history_projection == "none":
+        return None
+    return {
+        "mode": args.history_projection,
+        "step": args.history_projection_step,
+        "alpha": args.history_projection_alpha,
+        "codebook": (
+            {
+                "path": str(args.history_projection_codebook.resolve()),
+                "sha256": sha256_file(args.history_projection_codebook),
+            }
+            if args.history_projection_codebook is not None
+            else None
+        ),
+    }
+
+
+def config_digest_payload(args, memory_partial_sha256=None):
+    """Single source of truth for the config digest, so a dry run and the real
+    rollout of the same configuration report the same experiment identity."""
+    payload = {
+        "model": str(DISTILLED),
+        "memory_module_kwargs": MEMORY_KWARGS,
+        "regime": generation_regime(args.sections),
+    }
+    # Only fold the partial into the digest when present so that runs without
+    # --memory-partial keep the exact r1 config digest.
+    if memory_partial_sha256 is not None:
+        payload["memory_partial_sha256"] = memory_partial_sha256
+    if args.segments > 1:
+        payload["event_switch"] = {
+            "segments": args.segments,
+            "sections_per_segment": args.sections_per_segment,
+        }
+    projection = history_projection_config(args)
+    if projection is not None:
+        payload["history_projection"] = projection
+    return payload
 
 
 def artifact_paths(output_root, run_id, arm, prompt_index):
@@ -625,29 +709,17 @@ def run(args, run_id, prompt_path, prompts):
     regime = generation_regime(args.sections)
     memory_partial_info = None
     if args.memory_partial is not None:
-        hasher = hashlib.sha256()
-        with open(args.memory_partial, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 24), b""):
-                hasher.update(chunk)
         memory_partial_info = {
             "path": str(args.memory_partial.resolve()),
-            "sha256": hasher.hexdigest(),
+            "sha256": sha256_file(args.memory_partial),
         }
-    digest_payload = {
-        "model": str(DISTILLED),
-        "memory_module_kwargs": MEMORY_KWARGS,
-        "regime": regime,
-    }
-    # Only fold the partial into the digest when present so that runs without
-    # --memory-partial keep the exact r1 config digest.
-    if memory_partial_info is not None:
-        digest_payload["memory_partial_sha256"] = memory_partial_info["sha256"]
-    if args.segments > 1:
-        digest_payload["event_switch"] = {
-            "segments": args.segments,
-            "sections_per_segment": args.sections_per_segment,
-        }
-    config_digest = canonical_digest(digest_payload)
+    projection_config = history_projection_config(args)
+    config_digest = canonical_digest(
+        config_digest_payload(
+            args,
+            memory_partial_sha256=None if memory_partial_info is None else memory_partial_info["sha256"],
+        )
+    )
     milestones = Milestones()
     timings = {}
     started = time.perf_counter()
@@ -722,6 +794,12 @@ def run(args, run_id, prompt_path, prompts):
             use_dynamic_shifting=REGIME["use_dynamic_shifting"],
             time_shift_type=REGIME["time_shift_type"],
             enable_evolving_memory=args.arm == "on",
+            history_projection=args.history_projection,
+            history_projection_step=args.history_projection_step,
+            history_projection_alpha=args.history_projection_alpha,
+            history_projection_codebook=(
+                str(args.history_projection_codebook) if args.history_projection_codebook is not None else None
+            ),
             generator=generator,
             callback_on_step_end=section_callback,
             callback_on_step_end_tensor_inputs=["latents"],
@@ -747,6 +825,29 @@ def run(args, run_id, prompt_path, prompts):
         raise RuntimeError(f"unexpected latent shape {tuple(latents.shape)}; expected {expected_shape}")
     if section != args.sections:
         raise RuntimeError(f"observed {section} completed sections; expected {args.sections}")
+
+    history_projection_stats = pipe.get_history_projection_stats()
+    if args.history_projection != "none":
+        # A projection that fired without changing a value is indistinguishable
+        # from no projection in the artifacts, so require a measured effect
+        # instead of publishing a silent no-op as a treated arm.
+        if history_projection_stats is None or history_projection_stats["num_applied"] == 0:
+            raise RuntimeError(
+                f"history projection {args.history_projection} never applied: {history_projection_stats}"
+            )
+        if history_projection_stats["num_changed"] == 0:
+            raise RuntimeError(
+                f"history projection {args.history_projection} applied but changed nothing: "
+                f"{history_projection_stats}"
+            )
+        milestones.emit(
+            f"history projection applied mode={args.history_projection} "
+            f"sections={history_projection_stats['num_applied']}/{history_projection_stats['num_calls']} "
+            f"changed={history_projection_stats['num_changed']} "
+            f"max_abs_delta={history_projection_stats['max_abs_delta']:.4g} "
+            f"padding_frames={history_projection_stats['num_frames_padding']}/"
+            f"{history_projection_stats['num_frames_seen']}"
+        )
 
     state_digest = None
     if args.arm == "on":
@@ -790,6 +891,8 @@ def run(args, run_id, prompt_path, prompts):
         ),
         "model": str(DISTILLED),
         "memory_partial": memory_partial_info,
+        "history_projection": projection_config,
+        "history_projection_stats": history_projection_stats,
         "source": source,
         "git_commit": source["git_commit"],
         "config_digest_sha256": config_digest,
@@ -837,11 +940,12 @@ def main(argv=None):
                     "prompt_count": args.num_prompts,
                     "regime": generation_regime(args.sections),
                     "config_digest_sha256": canonical_digest(
-                        {
-                            "model": str(DISTILLED),
-                            "memory_module_kwargs": MEMORY_KWARGS,
-                            "regime": generation_regime(args.sections),
-                        }
+                        config_digest_payload(
+                            args,
+                            memory_partial_sha256=(
+                                None if args.memory_partial is None else sha256_file(args.memory_partial)
+                            ),
+                        )
                     ),
                     "entries": entries,
                 },

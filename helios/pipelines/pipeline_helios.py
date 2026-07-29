@@ -36,7 +36,7 @@ from diffusers.video_processor import VideoProcessor
 
 from ..modules.transformer_helios import HeliosTransformer3DModel
 from ..scheduler.scheduling_helios import HeliosScheduler
-from ..utils.utils_base import AdaptiveAntiDrifting, apply_schedule_shift
+from ..utils.utils_base import AdaptiveAntiDrifting, HistoryProjector, apply_schedule_shift, load_history_codebook
 from ..utils.utils_helios_post import add_noise, convert_flow_pred_to_x0
 from .pipeline_output import HeliosPipelineOutput
 
@@ -493,6 +493,15 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 (idx, cap.detach().cpu(), sig) for idx, cap, sig in getattr(self, "_memory_queue", [])
             ],
         }
+
+    def get_history_projection_stats(self):
+        """Counters of the last run's history projection, or None when the
+        pipeline has not been called with one. A run must check num_applied:
+        an unapplied projection is silently identical to no projection."""
+        projector = getattr(self, "_history_projector", None)
+        if projector is None or not projector.enabled:
+            return None
+        return projector.stats()
 
     def stage1_sample(
         self,
@@ -977,6 +986,12 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         anti_drift_delta_mu: float = 0.15,
         anti_drift_delta_sigma: float = 0.15,
         anti_drift_corruption_strength: float = 0.1,
+        # ------------ History projection (training-free anti-drift) ------------
+        history_projection: str = "none",  # none, quantize, codebook, renorm
+        history_projection_step: float = 0.0,
+        history_projection_alpha: float = 1.0,
+        history_projection_codebook: Optional[str] = None,
+        history_projection_padding_tol: float = 0.0,
         # ------------ Evolving memory ------------
         enable_evolving_memory: bool = False,
         memory_state: Optional[dict] = None,
@@ -1079,6 +1094,17 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 device=self._execution_device,
                 dtype=torch.float32,
             )
+
+        history_projector = HistoryProjector(
+            mode=history_projection,
+            step=history_projection_step,
+            alpha=history_projection_alpha,
+            codebook=(
+                load_history_codebook(history_projection_codebook) if history_projection == "codebook" else None
+            ),
+            padding_tol=history_projection_padding_tol,
+        )
+        self._history_projector = history_projector
 
         history_sizes = sorted(history_sizes, reverse=True)  # From big to small
 
@@ -1382,6 +1408,23 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 latents_history_long, latents_history_mid, latents_history_short = history_latents[
                     :, :, -sum(history_sizes) :
                 ].split(history_sizes, dim=2)
+
+            if history_projector.enabled:
+                # Project the accumulated history only. The first frame of the
+                # short tier is the fixed x0 anchor, which is a reference frame
+                # rather than accumulated state, so it is left untouched. This
+                # runs before the sampler so the projected history is what the
+                # KV cache stores on the first denoising step.
+                if is_keep_x0:
+                    anchor = latents_history_short[:, :, :1]
+                    tiers = [latents_history_long, latents_history_mid, latents_history_short[:, :, 1:]]
+                else:
+                    anchor = None
+                    tiers = [latents_history_long, latents_history_mid, latents_history_short]
+                latents_history_long, latents_history_mid, projected_short = history_projector(tiers)
+                latents_history_short = (
+                    torch.cat([anchor, projected_short], dim=2) if anchor is not None else projected_short
+                )
 
             latents = self.prepare_latents(
                 batch_size,

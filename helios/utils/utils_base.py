@@ -815,6 +815,215 @@ class AdaptiveAntiDrifting:
         self.is_initialized = False
 
 
+class HistoryProjector:
+    """Training-free projection of the per-section history latents, applied
+    after the [long|mid|short] tiers are split and before they are patchified.
+
+    Long rollouts accumulate a slow bias in the history latents (visible as an
+    over-saturation runaway). Unlike AdaptiveAntiDrifting, which compares a
+    chunk against an EMA that drifts along with it and then injects noise into
+    the generated latents, these projections map the *conditioning* history
+    back onto a fixed support every section, so a sub-threshold per-section
+    increment cannot compound.
+
+    Modes:
+        "none"      no-op.
+        "quantize"  uniform scalar grid, ``round(z / step) * step``. The
+                    dead zone of ``step / 2`` erases small increments.
+        "codebook"  FramePack history discretization (arXiv 2504.12626 v3,
+                    Eq. 6): every latent pixel is replaced by the nearest
+                    centroid of a K-means codebook fitted on real latents.
+                    Note the paper applies this during training; using it on a
+                    checkpoint trained with continuous history is an
+                    inference-only variant.
+        "renorm"    per-channel affine match onto a frozen reference: the
+                    statistics of the first fully populated history window are
+                    recorded once, and every later history is mapped back onto
+                    them.
+
+    Every mode blends with the untouched history through ``alpha`` (0 = no-op,
+    1 = full projection). Padding frames are passed through untouched, which
+    keeps them out of the statistics and out of the codebook lookup (a centroid
+    is a real latent vector, so projecting padding would inject content into a
+    history window that is still empty). Padding is detected structurally: the
+    pipeline builds it with ``torch.zeros``, so a frame counts as padding only
+    when every element is within ``padding_tol`` of zero. A statistical test
+    would also catch legitimate near-constant frames and skip them silently.
+    The caller is responsible for excluding the fixed x0 anchor.
+    """
+
+    MODES = ("none", "quantize", "codebook", "renorm")
+
+    def __init__(
+        self,
+        mode: str = "none",
+        step: float = 0.0,
+        codebook: Optional[torch.Tensor] = None,
+        alpha: float = 1.0,
+        padding_tol: float = 0.0,
+    ):
+        if mode not in self.MODES:
+            raise ValueError(f"unknown history projection mode {mode!r}, expected one of {self.MODES}")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"history projection alpha must be in [0, 1], got {alpha}")
+        if mode == "quantize" and not step > 0.0:
+            raise ValueError(f"quantize mode needs a positive step, got {step}")
+        if mode == "codebook":
+            if codebook is None:
+                raise ValueError("codebook mode needs a codebook tensor")
+            if codebook.ndim != 2:
+                raise ValueError(f"codebook must be 2-D (K, C), got shape {tuple(codebook.shape)}")
+        if padding_tol < 0.0:
+            raise ValueError(f"padding_tol must be non-negative, got {padding_tol}")
+
+        self.mode = mode
+        self.step = float(step)
+        self.codebook = codebook
+        self.alpha = float(alpha)
+        self.padding_tol = float(padding_tol)
+
+        # Frozen per-channel reference for "renorm", set on the first fully
+        # populated history window.
+        self.reference = None
+        self.num_calls = 0
+        self.num_applied = 0
+        self.reference_call = None
+        # Effect size: a projection that fires without changing a single value
+        # is indistinguishable from no projection in the artifacts.
+        self.num_changed = 0
+        self.max_abs_delta = 0.0
+        self.num_frames_seen = 0
+        self.num_frames_padding = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "none" and self.alpha > 0.0
+
+    def stats(self) -> dict:
+        """Counters for the run manifest. num_applied only proves the branch
+        ran; num_changed and max_abs_delta prove it changed the history."""
+        return {
+            "mode": self.mode,
+            "step": self.step,
+            "alpha": self.alpha,
+            "padding_tol": self.padding_tol,
+            "codebook_size": None if self.codebook is None else int(self.codebook.shape[0]),
+            "num_calls": self.num_calls,
+            "num_applied": self.num_applied,
+            "reference_call": self.reference_call,
+            "num_changed": self.num_changed,
+            "max_abs_delta": self.max_abs_delta,
+            "num_frames_seen": self.num_frames_seen,
+            "num_frames_padding": self.num_frames_padding,
+        }
+
+    def __call__(self, tiers: List[torch.Tensor]) -> List[torch.Tensor]:
+        """Project a section's history tiers, each shaped (B, C, T, H, W).
+
+        Returns the tiers in the same order; tensors are returned unchanged
+        when the projector is disabled or the history is still all padding.
+        """
+        if not self.enabled:
+            return list(tiers)
+
+        self.num_calls += 1
+        masks = [t.abs().amax(dim=(1, 3, 4)) > self.padding_tol for t in tiers]
+        for mask in masks:
+            self.num_frames_seen += int(mask.numel())
+            self.num_frames_padding += int((~mask).sum())
+        if not any(bool(mask.any()) for mask in masks):
+            return list(tiers)
+
+        if self.mode == "renorm":
+            projected = self._renorm(tiers, masks)
+        else:
+            projected = [self._blend(t, self._pointwise(t), mask) for t, mask in zip(tiers, masks)]
+        if projected is None:
+            return list(tiers)
+
+        for original, result in zip(tiers, projected):
+            delta = (result - original).abs()
+            self.num_changed += int((delta > 0).sum())
+            self.max_abs_delta = max(self.max_abs_delta, float(delta.max()))
+
+        self.num_applied += 1
+        return projected
+
+    def _blend(self, latents: torch.Tensor, projected: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # At full strength the result must be the projection exactly: the point
+        # of the codebook mode is that the history lands on a finite support,
+        # and latents + 1.0 * (projected - latents) only rounds back to it.
+        blended = projected if self.alpha == 1.0 else latents + self.alpha * (projected - latents)
+        keep = mask.view(mask.shape[0], 1, mask.shape[1], 1, 1)
+        return torch.where(keep, blended, latents)
+
+    def _pointwise(self, latents: torch.Tensor) -> torch.Tensor:
+        if self.mode == "quantize":
+            return torch.round(latents / self.step) * self.step
+        return self._nearest_centroid(latents)
+
+    def _nearest_centroid(self, latents: torch.Tensor, chunk_size: int = 16384) -> torch.Tensor:
+        book = self.codebook.to(device=latents.device, dtype=latents.dtype)
+        b, c, f, h, w = latents.shape
+        flat = latents.permute(0, 2, 3, 4, 1).reshape(-1, c)
+        out = torch.empty_like(flat)
+        # ||x - m||^2 = ||x||^2 - 2 x.m + ||m||^2; the ||x||^2 term is constant
+        # per pixel and does not change the argmin.
+        book_sq = (book * book).sum(dim=1)
+        for start in range(0, flat.shape[0], chunk_size):
+            block = flat[start : start + chunk_size]
+            index = (book_sq - 2.0 * (block @ book.t())).argmin(dim=1)
+            out[start : start + chunk_size] = book[index]
+        return out.view(b, f, h, w, c).permute(0, 4, 1, 2, 3)
+
+    def _renorm(self, tiers: List[torch.Tensor], masks: List[torch.Tensor]) -> Optional[List[torch.Tensor]]:
+        values = self._channel_values(tiers, masks)
+        mean = values.mean(dim=1)
+        std = values.std(dim=1)
+
+        if self.reference is None:
+            # Freeze the reference on the first history window that carries no
+            # zero padding, so the reference describes real generated content.
+            if not all(bool(mask.all()) for mask in masks):
+                return None
+            self.reference = (mean.detach().clone(), std.detach().clone())
+            self.reference_call = self.num_calls
+            return None
+
+        ref_mean, ref_std = self.reference
+        ref_mean = ref_mean.to(device=mean.device, dtype=mean.dtype)
+        ref_std = ref_std.to(device=std.device, dtype=std.dtype)
+        scale = ref_std / std.clamp_min(1e-4)
+        shift = ref_mean - mean * scale
+
+        out = []
+        for latents, mask in zip(tiers, masks):
+            projected = latents * scale.view(1, -1, 1, 1, 1) + shift.view(1, -1, 1, 1, 1)
+            out.append(self._blend(latents, projected, mask))
+        return out
+
+    @staticmethod
+    def _channel_values(tiers: List[torch.Tensor], masks: List[torch.Tensor]) -> torch.Tensor:
+        """Per-channel values of every valid history frame, shaped (C, N)."""
+        columns = []
+        for latents, mask in zip(tiers, masks):
+            for b in range(latents.shape[0]):
+                selected = latents[b][:, mask[b]]
+                if selected.shape[1] == 0:
+                    continue
+                columns.append(selected.reshape(selected.shape[0], -1))
+        return torch.cat(columns, dim=1)
+
+
+def load_history_codebook(path: str) -> torch.Tensor:
+    """Load a (K, C) K-means codebook saved by scripts/evaluation/fit_history_codebook.py."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    codebook = payload["codebook"] if isinstance(payload, dict) else payload
+    if not torch.is_tensor(codebook) or codebook.ndim != 2:
+        raise ValueError(f"{path} does not contain a 2-D (K, C) codebook")
+    return codebook.float()
+
+
 def build_transformer_param_groups(transformer, base_lr, memory_lr):
     """Split trainable transformer params into base vs evolving-memory groups
     (design ch.2 D11). Memory params (full-rank encoder + per-block
