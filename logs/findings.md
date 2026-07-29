@@ -118,3 +118,14 @@
 **已知盲区(按重要性)**:① 身份/背景一致性未量化——记忆的核心价值只能人眼看站点,补法 = CLIP 相似度轨迹(v5 协议);② **过拟合不可见**——pilot 44 epochs 的完美斜率可能绑定其 2,869 clips 分布,现成检法 = rep50 尚未使用的 case 8-15 做 held-out 泛化检验(≈2.7 GPU·h,可直接仲裁 pilot vs full 选基);③ 观感质量无分数——团队现成 `scripts/evaluation/metrics/`(DOVER/HPSv3/PickScore)可对已有 130+ 支视频离线补算,无需新推理;④ 可塑性(哪个 ckpt 进 Stage B 后训得更好)只有 Stage B 能答。
 
 **跨协议durable 结论:短时域指标不预测长时域行为**。两次独立证实:r3(90s,off 温和去饱和 −0.137)vs r5(8min,off 中后段过饱和 +0.219);full@8000 切换协议优于基线(−0.263)但 8min 劣于基线(+0.297,3/5 失控)。⇒ **8min 协议从"可选"升级为选基必测项**(判定见 `logs/research/p2-longhorizon-verdict-r5-2026-07-28.md` 附录)。
+
+## 2026-07-29 深夜:抗漂移机制定位 + FramePack 离散化真相 + pinghe 节点守卫缺口
+
+**结论:漂移的因果链是历史 latent 误差逐段复利,与记忆的"补窗口外信息"是两条独立链路;记忆提供 onset 之后的回复力而不推迟 onset。设计契约见 `docs/specs/2026-07-29-history-projection-design.md`。**
+
+1. **记忆不预防漂移(onset 细算证实)**:pilot@4000 的 onset 中位 173s(5/5 触发)比 off 209s(3/5 触发)**更早**,但 0/5 失控、5/5 末段回收(off 2/5 单调失控)。用户观测的"3min 起明显漂移"在量级上成立、作为普适阈值不成立(单 case 109–404s,off 有 2/5 全程不触发,full@8000 系统性更早 ~124s)。全部数据与 r5 判定表零分歧:`logs/research/read-r5-drift-onset-analysis.md`。新判据:主 = onset 定义(a),副 = 末段回收比(off 0.801 / pilot@4000 **0.511** / full@8000 0.809)。
+2. **FramePack 的 history discretization 是训练期操作**:仅记载于 arXiv 2504.12626 **v3(2025-10 修订)**,无独立 "P1" 论文、**从未放出代码或权重**(issue #738 无人应答)。机制 = 在预计算 latent 上离线拟合 K-means 码本 Ω,训练时把每个 history 帧替换为最近质心重建(Eq.6),位置在 VAE encode 后、patchify 前,只作用条件帧。原文明文 "during training";骨干必须微调才能吃量化历史 ⇒ **免训练直接量化是新的未验证变体,不是复现论文**。超参只有 K:正文推荐 128 而 Table 2 用 256(自相矛盾,K-sweep 未公开)。消融:Δ_M(前/后 15% 帧差)全面改善(ΔClarity 3.18→2.30、ΔAnatomy 18.05→14.11),ELO 1030–1092 → 1139–1225,且运动动态范围优于 inverted anti-drifting。取证:`logs/research/read-framepack-p1-history-discretization.md`。
+3. **均匀标量量化对系统性偏置无抑制作用(机制证伪,拦在 GPU 花费之前)**:按 dither 理论,偏置 b<step/2 会让约 b/step 比例的像素跳一整格,均值位移原样保留;实测 19.9% 元素跳整格。⇒ 我原先"死区吃掉漂移增量"的推理错误,quantize 从候选降级为**对照臂**(若它也有效则机制不是统计量复原)。回归护栏:`tests/test_history_projector.py::test_quantize_does_not_remove_a_sub_step_bias`。
+4. **继承的 `AdaptiveAntiDrifting` 按构造治不了慢漂移**(`helios/utils/utils_base.py:743-815`,默认关闭且评测从未开启):参照是 ρ=0.9 的 EMA(≈10 chunk 记忆),慢蠕变把参照一起带走;`and` 双阈值再降灵敏度;"修正"是加白噪声(抬方差不复位均值)且作用于 `latents`、在 append 之前 ⇒ 污染可见输出。不复用。
+5. **语料 latent 已在模型空间(码本拟合的最大坑)**:离线编码器存盘前就做了 `(z_raw−mean)/std`(`tools/offload_data/get_short-latents.py:104-107,229-232`),loader 原样传递。二次归一化会让码本评分从 0.5304 恶化到 0.8853。语料逐通道 std 0.65–0.86(聚合 0.823)、均值 −0.70…+0.59,**不严格等于 0/1 先验**(VAE 常量是全局的,本语料是单人子集)。k256 码本 held-out L2 1.135 / 保留方差 84.7% ⇒ α=1 投影约改动向量模长的 **37%**,属显著 OOD,必须 α sweep。
+6. **pinghe 节点守卫缺口(操作风险,已修)**:实测 pinghe 在 **c-node03/04/06/07 全部 32 卡**上跑 Slurm 外进程(每卡约 57GB 常驻、**每卡余 ~86GB**),而 Slurm 报这四台 `idle`。评测 launcher 的守卫只看"Default 模式 + 60GB 余量"、**不看属主**,在 pinghe 卡上会照样放行——此前未出事仅因 launcher 硬编码了 `--nodelist=c-node08`。已在 r3/r4 两个 launcher 加显式属主守卫:GPU 进程属主含 pinghe 即 `EXIT_CODE=44` 拒跑。另:c-node08/mc-node02 上是 xiangbo(每进程约 41GB)+ 我们的作业,属规则允许的叠加。
