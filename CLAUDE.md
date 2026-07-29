@@ -29,6 +29,8 @@ Invariants (read before touching model/training code):
 - Trainer: config flags + `validate_evolving_memory_config` (`helios/utils/train_config.py`), extra-components section 5, role-tagged param groups, `memory_freeze_backbone` (Stage A).
 - Pipeline state machine: per-section read, last-scheduled-step capture (own sigma per entry), k−2 eviction writes, `get_memory_state` — in `helios/pipelines/pipeline_helios.py`.
 - Tests: `tests/test_*.py` (CPU, SDPA-patched) + `tests/smoke_real_weights.py` / `smoke_rollout.py` / `smoke_a1_assembly.py` (GPU, real weights).
+- Eval toolchain (drift A/B, one driver serves all protocols): `scripts/evaluation/run_p2_interim_drift_ab.py` — `--prompt-set rep50` (structural cases, MANDATORY: raw sentences are prompt-OOD), `--segments/--sections-per-segment` (event switching via the pipeline's native interactive path), `--sections` (horizon), `--memory-partial` (load trained memory; backbone patch convs excluded by design). Launchers `sbatch_p2_r3_infer.sbatch` / `sbatch_p2_r4_eventswitch.sbatch` (both remap CVD to the max-free Default-mode GPU); metrics `tools/long_video_eval/scripts/run_helios_long_timeseries_metric.py`, batched by `sbatch_p2_metrics_batch.sbatch`. Chain evals behind training with `--dependency=afterany:<jobid>` so they survive session loss.
+- Preview site: `scripts/evaluation/build_p2_site.py` → `results/p2_site/` (two pages: event-switch main + static/long-horizon sub-page). Campaigns named `p2-rep50-*` are auto-discovered on rebuild; voided raw-prompt campaigns stay excluded. Served by a detached http-server + cloudflared tunnel with keepalive (`p2_site_keepalive.sh`), current URL in `results/p2_site/.current_url`.
 
 ## Documentation conventions
 

@@ -104,3 +104,17 @@
 
 **结论 1(prompt 不合规)**:训练 caption 与团队标准推理集均为结构化格式(`<header>/<event>/<role>/<Background>`,见 captions.jsonl 首条与 `eval_prompts_rep50/3000.csv`),而 P2 r1/r2 所用 prompt 为 `eval_prompts_vs24_long` test split 的 **raw 裸句列**(eval_norm/long/prompt.txt,20 条)——r1 计划期因 2178 帧参考时长精确匹配 66-section 协议而选中,未执行结构化改写规范,r2 为保种子/prompt 配对继承之。**影响**:三臂同 prompt 同 seed,内部相对结论(静态塌缩消除、饱和斜率翻转)仍有效;但全部臂处于 backbone prompt-OOD 状态,绝对漂移量级不作数,正式 Stage A 验收必须换 `eval_prompts_rep50`(实测 50 个结构化 case,id 3000+)。
 **结论 2(基座谱系)**:Stage A 基座 = Helios-Base + `stage1_lora_cfr_368_correct/checkpoint-19500` LoRA 合并(设计 D8/主线协调明文冻结,保 C2 配对可比);用户提及的 27500 属 `stage1_lora_reweight_368`(同样自 _correct@19500 分叉的 rwtag 重加权 campaign,现已完结于 **checkpoint-31140-final**)。迁基座 = 设计变更,候选时机为 Stage B 选基或 Stage A-v2。
+
+## 2026-07-29:ckpt 质量判定体系(四层)与已知盲区
+
+**结论:memory ckpt 的质量只能由行为 A/B 判定,训练侧信号(loss)在本设定下无判定力,且短时域结果不能外推长时域。**
+
+四层判定(由浅到深,前两层是前提而非质量):
+1. **结构完整性**(每 ckpt 落盘即查):LoRA 814 tensors 零 memory 键泄漏 / `transformer_partial.pth` 84 键(evolving 38 + patch 6 + per-head key_scale 40)/ `query_state` 缺席 / 权重全有限。只排除保存损坏。至今 40+ ckpt(pilot 9 + slice512 9 + full 24)零破坏。
+2. **训练信号(弱)**:flow-matching 逐批 σ 方差 + 冻结骨干 ⇒ loss 全程 ~0.08-0.09 平台,**无判定力**;有用的是相邻 ckpt 的 evolving rel-L2 移动量(每 500 步 0.3-0.8%)与 gate/key_scale 演化(gate 由"对输入零响应"变为内容依赖)——只回答"在学",不回答"学得好"。
+3. **行为 A/B(现役主力)**:三协议 × 种子配对 × 三类对照(off / untrained / 各 ckpt)⇒ ① 病理计数(冻结 motion→0、爆冲 sat 失控)= 一票否决;② sat Theil-Sen 斜率距零度(给出步数演化曲线);③ 8min 回复力(偏移是否末段回收)= 目前区分度最高的单项。
+4. **交叉验证**:同步数 × 不同语料横比(pilot/slice512/full @4000)暴露"多样性 vs 复读"结构;不同时域(58s/90s/8min)暴露漂移形态的时域依赖。
+
+**已知盲区(按重要性)**:① 身份/背景一致性未量化——记忆的核心价值只能人眼看站点,补法 = CLIP 相似度轨迹(v5 协议);② **过拟合不可见**——pilot 44 epochs 的完美斜率可能绑定其 2,869 clips 分布,现成检法 = rep50 尚未使用的 case 8-15 做 held-out 泛化检验(≈2.7 GPU·h,可直接仲裁 pilot vs full 选基);③ 观感质量无分数——团队现成 `scripts/evaluation/metrics/`(DOVER/HPSv3/PickScore)可对已有 130+ 支视频离线补算,无需新推理;④ 可塑性(哪个 ckpt 进 Stage B 后训得更好)只有 Stage B 能答。
+
+**跨协议durable 结论:短时域指标不预测长时域行为**。两次独立证实:r3(90s,off 温和去饱和 −0.137)vs r5(8min,off 中后段过饱和 +0.219);full@8000 切换协议优于基线(−0.263)但 8min 劣于基线(+0.297,3/5 失控)。⇒ **8min 协议从"可选"升级为选基必测项**(判定见 `logs/research/p2-longhorizon-verdict-r5-2026-07-28.md` 附录)。
