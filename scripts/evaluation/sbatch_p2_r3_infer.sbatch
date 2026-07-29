@@ -9,7 +9,9 @@
 #SBATCH --output=/mnt/beegfs/siyuan/workspace/helios-echo/results/p2_interim/logs/%x_%j.log
 
 # P2 r3: rep50 structural prompts, three-arm rebuild (off / on-untrained / on-trained).
-# Usage: sbatch sbatch_p2_r3_infer.sbatch <arm> <prompt_index> <run_id> [memory_partial.pth|none]
+# Usage: sbatch sbatch_p2_r3_infer.sbatch <arm> <prompt_index> <run_id> \
+#          [memory_partial.pth|none] [sections] [projection] [alpha] [step] [codebook.pt|none]
+# projection: none | renorm | codebook | quantize (training-free anti-drift, 2026-07-29 design)
 # Deliberately stacked on partially occupied GPUs (user-authorized).
 set -uo pipefail
 ARM="$1"
@@ -17,6 +19,10 @@ PIDX="$2"
 RUNID="$3"
 PARTIAL="${4:-none}"
 SECTIONS="${5:-66}"
+PROJ="${6:-none}"
+PROJ_ALPHA="${7:-1.0}"
+PROJ_STEP="${8:-0}"
+PROJ_CODEBOOK="${9:-none}"
 
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
@@ -56,6 +62,15 @@ echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts 8 --sections "$SECTIONS")
 if [ "$PARTIAL" != "none" ]; then
   ARGS+=(--memory-partial "$PARTIAL")
+fi
+if [ "$PROJ" != "none" ]; then
+  ARGS+=(--history-projection "$PROJ" --history-projection-alpha "$PROJ_ALPHA")
+  if [ "$PROJ" = "quantize" ]; then
+    ARGS+=(--history-projection-step "$PROJ_STEP")
+  fi
+  if [ "$PROJ" = "codebook" ]; then
+    ARGS+=(--history-projection-codebook "$PROJ_CODEBOOK")
+  fi
 fi
 
 PYTHONPATH=. "$ENV/bin/python" scripts/evaluation/run_p2_interim_drift_ab.py "${ARGS[@]}"
