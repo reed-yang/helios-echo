@@ -137,3 +137,22 @@
 **结论 2(P1 是两机制分治,只有一半可移植)**:结果页原文——"Planned Anti-Drifting predicts sections that are far away from the next section before generating nearby sections"(减少**端点之间**的漂移);"History Discretization converts all history to discretization tokens (directly apply K-Mean to the entire dataset)"(减少**跨端点**漂移,"the endpoints themselves will not drift")。**Planned Anti-Drifting 是非因果的**(先远后近),与 Helios 流式自回归 rollout 及记忆 k−2 逐出写入语义根本冲突 ⇒ 不可移植;可移植的只有离散化。另:其公开证据为 >2100 帧、6 个通用 prompt、**无基线无量化指标**的纯视频页,证据等级低于我们现行逐 chunk 指标对照。
 
 **结论 3(Stage B 不能只加 YAML,且有静默陷阱)**:四部件三就绪——数据集已能吐 U 个连续 section(`memory_unroll_sections`,切 `19+9U`,按 U 过滤;`dataloader_history_latents_dist.py:349-362,596-623`,8/8 PASS);可微状态原语已在(`helios_memory.py:171-182` 用赋值而非原地写、不自动 detach,唯一截断 `detach_state()` :133-137,13/13 PASS);`capture_last_hidden` 逐 call 无状态可调 U 次(`transformer_helios.py:1365-1401`)。**缺 trainer unroll 循环**:`train_helios.py:1405-1435` 从不消费 `clean_all_latents`/`section_prompt_embeds`,`:1608-1634` 仍是单次 `_flow_loss` + `optimizer.step()`,无逐段 backward/state carry/TBPTT detach。**陷阱**:`train_helios.py:1575-1607` 的 memory 写入分支显式要求 `not memory_tf_unroll` ⇒ 今天打开 U=4 会正常跑完并落盘,但 `memory_tokens` 全程 `None`,**训出无记忆参与的 ckpt**(训练侧的静默 no-op)。配置 schema 与校验已在(`train_config.py:469-474,506-542`),但 `scripts/training/configs/` 下无 Stage B YAML。计算:U=4 每单元约 7-8 次 transformer forward,`gradient_checkpointing` 已启用,`offload` 与 stage1 dataset 互斥(`train_helios.py:2739-2744`)不可用作解法。
+
+## 2026-07-30:判据修正(signed slope → |slope|)+ full@12000 切换协议判读
+
+**结论:signed 平均斜率会让正负漂移互相抵消,不能当"距零漂移距离"用。改用 mean|slope| + 逐 case 配对比较后,全量谱系"更多步数能否救回"的答案是明确的"不能",且其自身最优点是 @4000 而非 @12000;pilot@4000 仍是唯一单调收敛到最小 |slope| 的谱系。**
+
+**判据修正(方法论,适用于全部既往与后续切换协议判读)**:signed mean 只回答"是否存在系统性漂移方向";距零距离必须用 |slope|。历史表述更正一处:此前称 pilot@4000 "零净漂移(−0.002)"——该 0 部分来自正负 case 抵消,其 mean|slope| 实为 0.244(仍是全臂最小,结论不变,但"零净漂移"夸大)。既往 verdict 的 signed 数字不改写(保留历史),以本条为口径修正。
+
+**切换协议 mean|slope|(n=8,种子跨臂配对,off 基线 0.661 / median 0.634)**:
+
+| 臂 | mean\|slope\| | median | 配对更近零 |
+|---|---|---|---|
+| untrained | 1.302 | 0.716 | 4/8 |
+| pilot@1500 → @2000 → **@4000** | 0.498 → 0.392 → **0.244** | 0.439 → 0.333 → **0.214** | 5/8 |
+| slice512@2000 / @4000 | 0.593 / 0.857 | 0.549 / 0.878 | 6/8 / 3/8 |
+| full@4000 / @8000 / **@12000** | 0.331 / 0.328 / **0.496** | 0.210 / 0.231 / 0.586 | **8/8** / 5/8 / 6/8 |
+
+1. **pilot 谱系单调收敛**(0.498→0.392→0.244);**全量谱系 4000 步后掉头变差**(0.331→0.328→0.496)⇒ 跑满 2.28 epoch 不能救回全量谱系,其最优 ckpt 是 @4000。
+2. **full@4000 是唯一 8/8 全 case 都比基线更近零的臂**(pilot@4000 为 5/8)⇒ 多样性语料给"普遍小幅改善",复读语料给"少数 case 大幅改善"。这是两种不同的记忆行为,不是同一指标上的强弱。
+3. 单 seed、n=8、off 臂本身 range [−1.254,+1.089] ⇒ 均值差 <0.05 不作主张;上表只支持"pilot@4000 最优""full 谱系 @12000 劣于 @4000/@8000"这两条量级结论。
