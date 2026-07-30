@@ -48,51 +48,24 @@ case ",$owners" in
 esac
 echo "GPU_OWNERS=$owners"
 
-# Slurm hands a single-GPU job its own card as cgroup index 0, so its own
-# CUDA_VISIBLE_DEVICES is both correct and distinct per job. Probe it first and
-# only fall back to picking a card ourselves. An UNCONDITIONAL "pick the
-# Default-mode card with the most free memory" makes every job that starts at
-# the same moment select the SAME card: observed 2026-07-30 on mc-node02 with 7
-# jobs piled onto 4 cards while 2 sat idle. The fallback still exists because
-# these nodes leak an unmanaged Prohibited-mode card into the cgroup (findings
-# 2026-07-27), which makes the assigned device unusable, and because a
-# colleague's stacked process can grow mid-run (2026-07-28 OOM of job 5739).
-# Slurm's own CUDA_VISIBLE_DEVICES is unusable on these nodes: an unmanaged
-# Prohibited-mode card leaks into every job cgroup and takes index 0 (findings
-# 2026-07-27, verified again 2026-07-30 by a torch probe returning
-# AcceleratorError). So each job must choose a card itself — and if every job
-# just takes "the one with the most free memory", simultaneous jobs all choose
-# the SAME card: observed 7 jobs on 4 cards with 2 idle, and one card driven to
-# 132/143GB, which is how job 5739 OOMed. Claim a card with an exclusive lock so
-# our own jobs on this node never land on the same one. The lock is held for the
-# life of the job through the open descriptor.
-# The claim runs in THIS shell, not a subshell: a lock taken inside $(...) dies
-# with the subshell and would guarantee nothing.
-candidates=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
-  | /usr/bin/awk -F', ' '$2 == "Default" && $3 >= 60000 {print $3, $1}' | /usr/bin/sort -rn | /usr/bin/awk '{print $2}')
-if [ -z "$candidates" ]; then
+# A job's cgroup shows exactly two devices: the card Slurm assigned and an
+# unmanaged Prohibited-mode card that leaks in (findings 2026-07-27). Their
+# enumeration order VARIES between allocations, so Slurm's CUDA_VISIBLE_DEVICES=0
+# sometimes points at the unusable one (2026-07-30: a torch probe returned
+# AcceleratorError and the Default card was index 1). Pick the Default-mode
+# device: within a cgroup there is exactly one, and it is this job's own card.
+# Verified by srun on an empty node: two visible devices, one Default, one
+# Prohibited. A job cannot see other jobs' cards, so jobs cannot collide here
+# and no cross-job locking is needed.
+goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
+  | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
+if [ -z "$goodidx" ]; then
   echo "NO_GPU_WITH_HEADROOM"
   echo "EXIT_CODE=43"
   exit 43
 fi
-goodidx=""
-for idx in $candidates; do
-  exec {GPU_LOCK_FD}>"/tmp/helios_gpu_${idx}.lock" 2>/dev/null || continue
-  if /usr/bin/flock -n "$GPU_LOCK_FD"; then
-    goodidx="$idx"
-    break
-  fi
-  exec {GPU_LOCK_FD}>&-
-done
-if [ -n "$goodidx" ]; then
-  export CUDA_VISIBLE_DEVICES="$goodidx"
-  echo "GPU_CLAIMED cvd=$CUDA_VISIBLE_DEVICES (exclusive lock, candidates=$(echo $candidates | tr '\n' ' '))"
-else
-  # Every roomy card is already claimed by one of our jobs: share the roomiest
-  # rather than failing, and say so in the log.
-  export CUDA_VISIBLE_DEVICES=$(echo "$candidates" | /usr/bin/head -1)
-  echo "GPU_SHARED cvd=$CUDA_VISIBLE_DEVICES (all free cards already locked)"
-fi
+export CUDA_VISIBLE_DEVICES="$goodidx"
+echo "GPU_SELECTED cvd=$CUDA_VISIBLE_DEVICES (Default-mode device in this cgroup)"
 
 ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts "$NUMP" --sections "$SECTIONS")
 if [ "$PARTIAL" != "none" ]; then
