@@ -836,6 +836,15 @@ class HistoryProjector:
                     Note the paper applies this during training; using it on a
                     checkpoint trained with continuous history is an
                     inference-only variant.
+        "jitter"    TRAINING-ONLY augmentation: a RANDOM per-channel affine of
+                    magnitude `jitter`. Inference-time renorm applies a slightly
+                    different deterministic transform each section, and the model
+                    reads that statistics change as content, which steps the
+                    output at every chunk boundary (measured 2026-07-30: the step
+                    grows with alpha). Training on random rescalings teaches the
+                    model that history statistics carry no signal, which should
+                    remove the step. It corrects nothing by itself, so it is not
+                    offered as an inference mode.
         "renorm"    per-channel affine match onto a frozen reference: the
                     statistics of the first fully populated history window are
                     recorded once, and every later history is mapped back onto
@@ -852,7 +861,7 @@ class HistoryProjector:
     The caller is responsible for excluding the fixed x0 anchor.
     """
 
-    MODES = ("none", "quantize", "codebook", "renorm")
+    MODES = ("none", "quantize", "codebook", "renorm", "jitter")
 
     def __init__(
         self,
@@ -862,6 +871,8 @@ class HistoryProjector:
         alpha: float = 1.0,
         padding_tol: float = 0.0,
         smooth: float = 0.0,
+        jitter: float = 0.0,
+        generator: Optional[torch.Generator] = None,
     ):
         if mode not in self.MODES:
             raise ValueError(f"unknown history projection mode {mode!r}, expected one of {self.MODES}")
@@ -878,6 +889,10 @@ class HistoryProjector:
             raise ValueError(f"padding_tol must be non-negative, got {padding_tol}")
         if not 0.0 <= smooth < 1.0:
             raise ValueError(f"smooth must be in [0, 1), got {smooth}")
+        if mode == "jitter" and not jitter > 0.0:
+            raise ValueError(f"jitter mode needs a positive jitter magnitude, got {jitter}")
+        if jitter < 0.0:
+            raise ValueError(f"jitter must be non-negative, got {jitter}")
 
         self.mode = mode
         self.step = float(step)
@@ -892,6 +907,8 @@ class HistoryProjector:
         # damps the step; the write-time site removes the cause instead.
         self.smooth = float(smooth)
         self.previous_transform = None
+        self.jitter = float(jitter)
+        self.generator = generator
 
         # Frozen per-channel reference for "renorm", set on the first fully
         # populated history window.
@@ -919,6 +936,7 @@ class HistoryProjector:
             "alpha": self.alpha,
             "padding_tol": self.padding_tol,
             "smooth": self.smooth,
+            "jitter": self.jitter,
             "codebook_size": None if self.codebook is None else int(self.codebook.shape[0]),
             "num_calls": self.num_calls,
             "num_applied": self.num_applied,
@@ -948,6 +966,8 @@ class HistoryProjector:
 
         if self.mode == "renorm":
             projected = self._renorm(tiers, masks)
+        elif self.mode == "jitter":
+            projected = self._jitter(tiers, masks)
         else:
             projected = [self._blend(t, self._pointwise(t), mask) for t, mask in zip(tiers, masks)]
         if projected is None:
@@ -987,6 +1007,23 @@ class HistoryProjector:
             index = (book_sq - 2.0 * (block @ book.t())).argmin(dim=1)
             out[start : start + chunk_size] = book[index]
         return out.view(b, f, h, w, c).permute(0, 4, 1, 2, 3)
+
+    def _jitter(self, tiers: List[torch.Tensor], masks: List[torch.Tensor]) -> List[torch.Tensor]:
+        """One random per-channel affine, shared across the section's tiers so the
+        history stays internally consistent: the point is to rescale the whole
+        window's statistics, not to decorrelate its frames."""
+        reference = tiers[0]
+        channels = reference.shape[1]
+        noise = torch.randn(
+            2, channels, generator=self.generator, device=reference.device, dtype=reference.dtype
+        )
+        scale = torch.exp(noise[0] * self.jitter)
+        shift = noise[1] * self.jitter
+        out = []
+        for latents, mask in zip(tiers, masks):
+            projected = latents * scale.view(1, -1, 1, 1, 1) + shift.view(1, -1, 1, 1, 1)
+            out.append(self._blend(latents, projected, mask))
+        return out
 
     def _renorm(self, tiers: List[torch.Tensor], masks: List[torch.Tensor]) -> Optional[List[torch.Tensor]]:
         values = self._channel_values(tiers, masks)

@@ -165,6 +165,7 @@ training_config:
   history_projection: none
   history_projection_step: 0.0
   history_projection_alpha: 1.0
+  history_projection_jitter: 0.0
   history_projection_codebook: null
   #
   is_train_full_patch_embedding: false

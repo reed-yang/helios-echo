@@ -245,6 +245,7 @@ class TrainingConfig:
     history_projection: str = field(default="none")
     history_projection_step: float = field(default=0.0)
     history_projection_alpha: float = field(default=1.0)
+    history_projection_jitter: float = field(default=0.0)
     history_projection_codebook: Optional[str] = field(default=None)
     #
     has_multi_term_memory_patch: bool = field(default=False)
@@ -502,9 +503,14 @@ def validate_evolving_memory_config(training_config, data_config, validation_con
     (ValidationConfig() is a trivial default-constructed dataclass).
     """
     tc, dc = training_config, data_config
-    assert tc.history_projection in {"none", "quantize", "codebook", "renorm"}, (
-        "history_projection must be one of none, quantize, codebook, renorm"
+    assert tc.history_projection in {"none", "quantize", "codebook", "renorm", "jitter"}, (
+        "history_projection must be one of none, quantize, codebook, renorm, jitter"
     )
+    if tc.history_projection == "jitter":
+        assert tc.history_projection_jitter > 0, (
+            "history_projection jitter needs history_projection_jitter > 0"
+        )
+    assert tc.history_projection_jitter >= 0, "history_projection_jitter must be non-negative"
     if tc.history_projection == "quantize":
         assert tc.history_projection_step > 0, (
             "history_projection quantize requires history_projection_step > 0"

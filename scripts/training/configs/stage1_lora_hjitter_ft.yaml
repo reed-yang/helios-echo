@@ -1,11 +1,4 @@
-# PILOT variant of stage1_lora_mem368_A.yaml: same recipe, 40GB interim subset,
-# dedicated output_dir so the canonical dir stays reserved for the full-corpus run.
-# Launch (8 GPU, one idle node):
-#   srun -p gpu -w <node> --gres=gpu:h200:8 --cpus-per-task=96 --time=24:00:00 bash -c \
-#     "cd /mnt/beegfs/siyuan/workspace/helios-echo && WANDB_MODE=offline PYTHONPATH=. \
-#      /mnt/beegfs/yuheng/miniconda3/envs/helios/bin/accelerate launch --num_processes 8 \
-#      --mixed_precision bf16 train_helios.py --config scripts/training/configs/stage1_lora_mem368_A_pilot.yaml"
-output_dir: /mnt/beegfs/siyuan/helios_runs/stage1_lora_mem368_A_pilot
+output_dir: /mnt/beegfs/siyuan/helios_runs/stage1_lora_hjitter_ft
 logging_dir: logs
 seed: 44
 
@@ -39,7 +32,7 @@ data_config:
     # head slice) — enough for smokes and pilots ONLY. The original corpus
     # (latents_cfr_int_30b_368x640, ~168k clips, 2.53TB) vanished in the reorg;
     # REPOINT to the full restore before launching real Stage A training.
-    - "/mnt/beegfs/siyuan/dataset/human_single_368x640_subset/latents"
+    - "/mnt/beegfs/siyuan/dataset/human_single_368x640_slice512g/latents"
 
 
 model_config:
@@ -106,7 +99,7 @@ training_config:
   # resume_from_checkpoint=latest is crash-resume within THIS run only.
   # Recipe inherited unchanged from the _correct ancestor: Blur (corrupt_mode_history
   # random), I2V drop, Saturation (docs/HELIOS_CORRECT_RECIPE.md).
-  max_train_steps: 4000
+  max_train_steps: 2000
   train_batch_size: 2           # per-GPU; x40 GPU x accum2 = global batch 160 (5 nodes)
   gradient_accumulation_steps: 2
   checkpointing_steps: 500
@@ -186,10 +179,10 @@ training_config:
   #
   is_amplify_history: false
   history_scale_mode: "per_head"
-  history_projection: none
+  history_projection: jitter
   history_projection_step: 0.0
   history_projection_alpha: 1.0
-  history_projection_jitter: 0.0
+  history_projection_jitter: 0.1
   history_projection_codebook: null
   #
   is_train_full_patch_embedding: false
@@ -204,14 +197,14 @@ training_config:
   restrict_lora: false
   restrict_lora_rank: 128
   # ---- Evolving Memory ----
-  is_enable_evolving_memory: true
+  is_enable_evolving_memory: false
   memory_num_query_frames: 3
   memory_frame_hw: [12, 20]
   memory_enc_num_layers: 2
   memory_gate_init_bias: 0.75
   is_amplify_memory: true
-  is_train_memory_module: true
-  memory_freeze_backbone: true
+  is_train_memory_module: false
+  memory_freeze_backbone: false
   memory_learning_rate: 5.0e-5
   memory_bptt_sections: 1
   memory_write_source: "t0_hidden"

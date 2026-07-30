@@ -1115,6 +1115,7 @@ def main(args):
         mode=args.training_config.history_projection,
         step=args.training_config.history_projection_step,
         alpha=args.training_config.history_projection_alpha,
+        jitter=args.training_config.history_projection_jitter,
         codebook=(
             load_history_codebook(args.training_config.history_projection_codebook)
             if args.training_config.history_projection == "codebook"
