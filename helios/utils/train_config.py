@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -241,6 +242,10 @@ class TrainingConfig:
             "choices": ["scalar", "per_head"],
         },
     )
+    history_projection: str = field(default="none")
+    history_projection_step: float = field(default=0.0)
+    history_projection_alpha: float = field(default=1.0)
+    history_projection_codebook: Optional[str] = field(default=None)
     #
     has_multi_term_memory_patch: bool = field(default=False)
     is_train_full_multi_term_memory_patchg: bool = field(default=False)
@@ -497,6 +502,31 @@ def validate_evolving_memory_config(training_config, data_config, validation_con
     (ValidationConfig() is a trivial default-constructed dataclass).
     """
     tc, dc = training_config, data_config
+    assert tc.history_projection in {"none", "quantize", "codebook", "renorm"}, (
+        "history_projection must be one of none, quantize, codebook, renorm"
+    )
+    if tc.history_projection == "quantize":
+        assert tc.history_projection_step > 0, (
+            "history_projection quantize requires history_projection_step > 0"
+        )
+    if tc.history_projection == "codebook":
+        assert tc.history_projection_codebook is not None and os.path.isfile(tc.history_projection_codebook), (
+            "history_projection codebook requires an existing history_projection_codebook file"
+        )
+    # renorm maps a history window's per-channel statistics back onto an earlier
+    # reference from the SAME rollout. A training sample is a single window from
+    # its own video, so there is no earlier reference: a per-run reference would
+    # recolour every sample toward whichever video came first, and a per-sample
+    # reference would freeze and then never project (a silent no-op). It becomes
+    # meaningful only once training unrolls several sections of one rollout.
+    assert tc.history_projection != "renorm", (
+        "history_projection renorm is inference-only: a single-window training sample has no "
+        "earlier statistics of its own rollout to renormalize toward. Use quantize or codebook "
+        "for training, or enable it after unrolled training (memory_tf_unroll) exists."
+    )
+    assert 0.0 <= tc.history_projection_alpha <= 1.0, (
+        "history_projection_alpha must be in [0, 1]"
+    )
     if tc.is_train_memory_module:
         assert tc.is_enable_evolving_memory, (
             "is_train_memory_module requires is_enable_evolving_memory"

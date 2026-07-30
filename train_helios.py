@@ -45,6 +45,8 @@ from helios.utils.utils_base import (
     get_optimizer,
     load_extra_components,
     build_transformer_param_groups,
+    HistoryProjector,
+    load_history_codebook,
     load_model_checkpoint,
     save_extra_components,
     save_model_checkpoint,
@@ -1099,6 +1101,21 @@ def main(args):
     accelerator.print(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     accelerator.print(f"  Gradient Accumulation steps = {args.training_config.gradient_accumulation_steps}")
     accelerator.print(f"  Total optimization steps = {args.training_config.max_train_steps}")
+    # One projector per run. The stateless modes (quantize / codebook) only use
+    # it to accumulate observable counters, and renorm — the one mode that
+    # carries state — is rejected for training by the config validator, because
+    # a single-window sample has no earlier statistics of its own rollout.
+    history_projector = HistoryProjector(
+        mode=args.training_config.history_projection,
+        step=args.training_config.history_projection_step,
+        alpha=args.training_config.history_projection_alpha,
+        codebook=(
+            load_history_codebook(args.training_config.history_projection_codebook)
+            if args.training_config.history_projection == "codebook"
+            else None
+        ),
+    )
+    accelerator.print(f"History projection stats at startup: {history_projector.stats()}")
     global_step = 0
     first_epoch = 0
 
@@ -1432,6 +1449,12 @@ def main(args):
                         is_keep_x0=True,
                         dtype=weight_dtype,
                         device=accelerator.device,
+                        # Keep one projector per run. Stateless modes only retain
+                        # counters; renorm must retain its first fully populated
+                        # window as the frozen reference across training samples.
+                        # Recreating it per independent sample would only freeze
+                        # that sample and never apply a projection.
+                        history_projector=history_projector,
                     )
                     # Retain the D5 write-forward inputs before the batch teardown
                     # (Stage A single-write simulation, design ch.2 D4/D5). The
@@ -2253,6 +2276,9 @@ def main(args):
                     free_memory()
 
                 if global_step % args.training_config.checkpointing_steps == 0:
+                    accelerator.print(
+                        f"History projection stats at step {global_step}: {history_projector.stats()}"
+                    )
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
 
                     if not getattr(args.training_config, "skip_dataloader_dcp", False):

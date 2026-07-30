@@ -787,6 +787,7 @@ def prepare_stage1_clean_input_from_latents(
     is_keep_x0: bool = True,
     dtype=torch.bfloat16,
     device="cpu",
+    history_projector=None,
 ):
     if is_keep_x0:
         latents_prefix = x0_latents.to(device, dtype=dtype)
@@ -873,6 +874,18 @@ def prepare_stage1_clean_input_from_latents(
                 if remaining_drop > 0 and len_1x > 0:
                     drop_1x = min(remaining_drop, len_1x)
                     latents_history_1x[:, :, :drop_1x, :, :] = 0
+
+    if history_projector is not None and history_projector.enabled:
+        original_dtype = latents_history_long.dtype
+        tiers = [latents_history_long, latents_history_mid, latents_history_1x]
+        if original_dtype in (torch.float16, torch.bfloat16):
+            tiers = [tier.float() for tier in tiers]
+        latents_history_long, latents_history_mid, latents_history_1x = history_projector(tiers)
+        if latents_history_long.dtype != original_dtype:
+            latents_history_long, latents_history_mid, latents_history_1x = [
+                tier.to(dtype=original_dtype)
+                for tier in (latents_history_long, latents_history_mid, latents_history_1x)
+            ]
 
     if is_keep_x0:
         latents_history_short = torch.cat([latents_prefix, latents_history_1x], dim=2)

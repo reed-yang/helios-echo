@@ -23,6 +23,9 @@ PROJ="${6:-none}"
 PROJ_ALPHA="${7:-1.0}"
 PROJ_STEP="${8:-0}"
 PROJ_CODEBOOK="${9:-none}"
+# Widens the rep50 case window; the default 8 keeps every existing campaign
+# identical, 16 exposes the held-out cases 8-15.
+NUMP="${10:-8}"
 
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
@@ -59,7 +62,7 @@ fi
 export CUDA_VISIBLE_DEVICES="$goodidx"
 echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 
-ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts 8 --sections "$SECTIONS")
+ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts "$NUMP" --sections "$SECTIONS")
 if [ "$PARTIAL" != "none" ]; then
   ARGS+=(--memory-partial "$PARTIAL")
 fi

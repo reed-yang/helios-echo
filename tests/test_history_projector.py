@@ -1,8 +1,12 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
+from helios.utils.train_config import DataConfig, TrainingConfig, ValidationConfig, validate_evolving_memory_config
 from helios.utils.utils_base import HistoryProjector
+from helios.utils.utils_helios_base import prepare_stage1_clean_input_from_latents
 
 
 def full_masks(tiers):
@@ -192,6 +196,105 @@ class HistoryProjectorTest(unittest.TestCase):
         for original, projected in zip(tiers, projector(tiers)):
             self.assertEqual(original.shape, projected.shape)
             self.assertEqual(original.dtype, projected.dtype)
+
+
+class TrainingHistoryProjectionTest(unittest.TestCase):
+    def setUp(self):
+        generator = torch.Generator().manual_seed(1)
+        self.history = torch.randn(1, 16, 19, 2, 2, generator=generator)
+        self.target = torch.randn(1, 16, 9, 2, 2, generator=generator)
+        self.anchor = torch.full((1, 16, 1, 2, 2), 0.37)
+
+    def prepare(self, projector=None, dtype=torch.float32):
+        return prepare_stage1_clean_input_from_latents(
+            history_latents=self.history.to(dtype=dtype),
+            target_latents=self.target.to(dtype=dtype),
+            x0_latents=self.anchor.clone(),
+            dtype=dtype,
+            history_projector=projector,
+        )
+
+    def test_default_training_path_is_bit_identical(self):
+        baseline = self.prepare()
+        disabled = self.prepare(HistoryProjector(mode="none"))
+        for expected, actual in zip(baseline, disabled):
+            self.assertTrue(torch.equal(expected, actual))
+
+    def test_training_projection_changes_history_but_not_anchor(self):
+        baseline = self.prepare()
+        projected = self.prepare(HistoryProjector(mode="quantize", step=0.5))
+        for index in (6, 7):
+            self.assertFalse(torch.equal(baseline[index], projected[index]))
+        self.assertFalse(torch.equal(baseline[5][:, :, 1:], projected[5][:, :, 1:]))
+        self.assertTrue(torch.equal(baseline[5][:, :, :1], projected[5][:, :, :1]))
+        self.assertTrue(torch.equal(projected[5][:, :, :1], self.anchor))
+
+    def test_training_projection_computes_in_fp32_then_casts_back(self):
+        projected = self.prepare(HistoryProjector(mode="quantize", step=0.1), dtype=torch.bfloat16)
+        for tier in projected[5:8]:
+            self.assertEqual(tier.dtype, torch.bfloat16)
+        incoming = self.history.to(torch.bfloat16).float()
+        expected = (torch.round(incoming / 0.1) * 0.1).to(torch.bfloat16)
+        actual = torch.cat([projected[7], projected[6], projected[5][:, :, 1:]], dim=2)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_training_codebook_changes_history(self):
+        codebook = torch.stack([torch.full((16,), -1.0), torch.full((16,), 1.0)])
+        baseline = self.prepare()
+        projected = self.prepare(HistoryProjector(mode="codebook", codebook=codebook))
+        self.assertFalse(torch.equal(baseline[7], projected[7]))
+        pixels = projected[7].permute(0, 2, 3, 4, 1).reshape(-1, 16)
+        self.assertTrue(bool(((pixels == -1.0).all(dim=1) | (pixels == 1.0).all(dim=1)).all()))
+
+
+class TrainingHistoryProjectionConfigTest(unittest.TestCase):
+    def validate(self, **overrides):
+        training = TrainingConfig()
+        data = DataConfig()
+        validation = ValidationConfig()
+        for key, value in overrides.items():
+            setattr(training, key, value)
+        validate_evolving_memory_config(training, data, validation)
+
+    def test_default_config_is_disabled(self):
+        training = TrainingConfig()
+        self.assertEqual(training.history_projection, "none")
+        self.assertEqual(training.history_projection_step, 0.0)
+        self.assertEqual(training.history_projection_alpha, 1.0)
+        self.assertIsNone(training.history_projection_codebook)
+        self.validate()
+
+    def test_invalid_mode_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            self.validate(history_projection="bogus")
+
+    def test_quantize_requires_positive_step(self):
+        with self.assertRaises(AssertionError):
+            self.validate(history_projection="quantize", history_projection_step=0.0)
+
+    def test_codebook_requires_existing_file(self):
+        with self.assertRaises(AssertionError):
+            self.validate(history_projection="codebook", history_projection_codebook=None)
+        with self.assertRaises(AssertionError):
+            self.validate(history_projection="codebook", history_projection_codebook="/missing/codebook.pt")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "codebook.pt"
+            torch.save(torch.ones(2, 16), path)
+            self.validate(history_projection="codebook", history_projection_codebook=str(path))
+
+    def test_alpha_must_be_in_unit_interval(self):
+        for alpha in (-0.1, 1.1):
+            with self.subTest(alpha=alpha), self.assertRaises(AssertionError):
+                self.validate(history_projection_alpha=alpha)
+
+    def test_renorm_is_rejected_for_training(self):
+        # A training sample is one window from its own video, so it has no
+        # earlier statistics of the same rollout to renormalize toward: a
+        # per-run reference would recolour the corpus toward whichever video
+        # came first, and a per-sample reference would never project at all.
+        with self.assertRaises(AssertionError) as caught:
+            self.validate(history_projection="renorm")
+        self.assertIn("inference-only", str(caught.exception))
 
 
 if __name__ == "__main__":

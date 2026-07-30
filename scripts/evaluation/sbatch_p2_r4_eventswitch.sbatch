@@ -19,6 +19,10 @@ PIDX="$2"
 RUNID="$3"
 PARTIAL="${4:-none}"
 NUMP="${5:-8}"
+PROJ="${6:-none}"
+PROJ_ALPHA="${7:-1.0}"
+PROJ_STEP="${8:-0}"
+PROJ_CODEBOOK="${9:-none}"
 
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
@@ -57,6 +61,15 @@ ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" \
       --prompt-set rep50 --num-prompts "$NUMP" --segments 6 --sections-per-segment 7)
 if [ "$PARTIAL" != "none" ]; then
   ARGS+=(--memory-partial "$PARTIAL")
+fi
+if [ "$PROJ" != "none" ]; then
+  ARGS+=(--history-projection "$PROJ" --history-projection-alpha "$PROJ_ALPHA")
+  if [ "$PROJ" = "quantize" ]; then
+    ARGS+=(--history-projection-step "$PROJ_STEP")
+  fi
+  if [ "$PROJ" = "codebook" ]; then
+    ARGS+=(--history-projection-codebook "$PROJ_CODEBOOK")
+  fi
 fi
 
 PYTHONPATH=. "$ENV/bin/python" scripts/evaluation/run_p2_interim_drift_ab.py "${ARGS[@]}"

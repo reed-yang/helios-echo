@@ -141,6 +141,10 @@ training_config:
   downsample_max_corrupt_ratio_history: 1.0
   is_amplify_history: false
   history_scale_mode: "per_head"
+  history_projection: none
+  history_projection_step: 0.0
+  history_projection_alpha: 1.0
+  history_projection_codebook: null
   is_train_full_patch_embedding: false
   is_train_lora_patch_embedding: true
   has_multi_term_memory_patch: true

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import yaml
 
 
@@ -59,7 +61,20 @@ def compare_dict(dict1, dict2, path, missing_keys, different_values):
 
 
 if __name__ == "__main__":
-    compare_yaml(
-        "configs/stage_1_init.yaml",
-        "configs/stage_1_post.yaml",
-    )
+    config_dir = Path(__file__).resolve().parent / "configs"
+    required_training_keys = {
+        "history_projection",
+        "history_projection_step",
+        "history_projection_alpha",
+        "history_projection_codebook",
+    }
+    missing = []
+    for path in sorted(config_dir.glob("*.yaml")):
+        with path.open("r") as stream:
+            config = yaml.safe_load(stream)
+        training_config = config.get("training_config", {}) if isinstance(config, dict) else {}
+        for key in sorted(required_training_keys - set(training_config)):
+            missing.append(f"{path.name}: training_config.{key}")
+    if missing:
+        raise SystemExit("Missing required training keys:\n" + "\n".join(missing))
+    print(f"Config completeness OK: {len(list(config_dir.glob('*.yaml')))} YAML files")
