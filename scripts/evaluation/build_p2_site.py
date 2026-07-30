@@ -47,6 +47,20 @@ R4_META = {
     "p2-rep50-r4evsw-on-full4000": {
         "on": ("r4◆ · on(full@4000,全量语料 ~0.76ep)", "168k 全量语料 4000 步:斜率 −0.19 优于基线与 slice512——语料多样性可部分替代重复暴露。"),
     },
+    "p2-rep50-r4evsw-on-full12000": {
+        "on": ("r4 ◆ 切换 · on(full@12000,全量终态)", "全量 run 终态。mean|slope| 0.496,劣于自身 @4000(0.331)与 @8000(0.328):步数越多越差。"),
+    },
+    # Held-out generalization: rep50 cases 8-15, never used for training or for
+    # any earlier evaluation. Same protocol and seeds as the in-sample arms.
+    "p2-rep50-r4evsw-heldout-off": {
+        "off": ("held-out 切换 · off(未见 case 8-15 基线)", "从未用于训练或评测的 8 个结构化 case。基线在域内/域外相当(0.661 vs 0.706),构成有效难度对照。"),
+    },
+    "p2-rep50-r4evsw-heldout-on-pilot4000": {
+        "on": ("held-out 切换 · on(pilot@4000)", "泛化检验:域内 mean|slope| 0.244 → 域外 0.531(边际缩水约 60%,配对 4/8)。驯服极端 case、扰乱温和 case。"),
+    },
+    "p2-rep50-r4evsw-heldout-on-full12000": {
+        "on": ("held-out 切换 · on(full@12000)", "域外 0.768,劣于无记忆基线 0.706(配对 3/8)——在未见 case 上是净负担。"),
+    },
     "p2-rep50-r4evsw-on-full8000": {
         "on": ("r4◆ · on(full@8000,~1.52ep)", "斜率 −0.26:未复现 pilot 式单调归零,仍优于基线,零病理;@12000 为决定点。"),
     },
@@ -60,6 +74,35 @@ R3_META = {
     },
     "p2-rep50-r5long-on-full8000": {
         "on": ("r5 ◆ 8 分钟 · on(full@8000,全量语料)", "多样性谱系的 8 分钟回复力检验:与上两组同 case 同 seed 配对。"),
+    },
+    "p2-rep50-r5long-on-full12000": {
+        "on": ("r5 ◆ 8 分钟 · on(full@12000,全量终态)", "全量 run 跑满 12k 步。判定:8min 上最差臂(斜率 +0.452,3/5 失控),前 3 分钟却是全臂最稳——早期抑制、后期放大。"),
+    },
+    # Training-free anti-drift projections (2026-07-30). All are off-arm, so the
+    # comparison target is the r5 off baseline above at the same case and seed.
+    "p2-rep50-r5long-off-renorm": {
+        "off": ("HP renorm α=1 · 8 分钟(无记忆)", "历史逐通道统计量拉回冻结参照。主候选:直接对症「饱和度上冲 = 统计量漂移」。对照 r5 off 同 case 同 seed。"),
+    },
+    "p2-rep50-r5long-off-renorm-a50": {
+        "off": ("HP renorm α=0.5 · 8 分钟", "同算子半强度。强度扫描:找「压住漂移但不压平画面」的窗口。"),
+    },
+    "p2-rep50-r5long-off-renorm-a25": {
+        "off": ("HP renorm α=0.25 · 8 分钟", "同算子四分之一强度。"),
+    },
+    "p2-rep50-r5long-off-cbk256": {
+        "off": ("HP codebook K=256 α=1 · 8 分钟", "FramePack 原式离散化(逐 latent pixel 取 K-means 最近质心),免训练使用。α=1 约改动向量模长 37%,预期可见画质代价。"),
+    },
+    "p2-rep50-r5long-off-cbk256-a50": {
+        "off": ("HP codebook K=256 α=0.5 · 8 分钟", "码本投影半强度,用于界定免训练可用窗口。"),
+    },
+    "p2-rep50-r5long-off-cbk128": {
+        "off": ("HP codebook K=128 α=1 · 8 分钟", "论文正文推荐的 K(表格用 256,自相矛盾),故两者都测。"),
+    },
+    "p2-rep50-r5long-off-quant025": {
+        "off": ("HP quantize s=0.25 · 8 分钟(机制对照)", "均匀网格量化。按 dither 理论它不该除偏(已在单测与 rollout 上证实),若它也有效则说明机制是「任何历史扰动都有效」。"),
+    },
+    "p2-rep50-r5long-on-pilot4000-renorm": {
+        "on": ("HP renorm α=1 × 记忆 pilot@4000 · 8 分钟", "交互臂:「防误差进入」(投影)能否叠加在「事后回拉」(记忆)之上。"),
     },
     "p2-rep50-r3-off": {
         "off": ("r3 · off(无记忆基线)", "rep50 结构化 prompt,静态单 prompt 90.75s。分布内基线漂移温和。"),
