@@ -45,35 +45,41 @@ case ",$owners" in
 esac
 echo "GPU_OWNERS=$owners"
 
-# Trust Slurm's own per-job GPU (cgroup index 0) unless it is unusable. An
-# unconditional max-free pick makes simultaneous jobs choose the same card and
-# pile up on it (2026-07-30: 7 jobs on 4 cards, 2 idle); the fallback remains
-# for the leaked Prohibited card and for a colleague's growing process.
-probe=$("$ENV/bin/python" -c "
-import torch
-try:
-    free, _ = torch.cuda.mem_get_info(0)
-    print('OK', free // (1024 * 1024))
-except Exception as exc:
-    print('FAIL', type(exc).__name__)
-" 2>/dev/null)
-echo "GPU_PROBE=$probe"
-keep=0
-case "$probe" in
-  OK*) free_mib=${probe#OK }; [ "$free_mib" -ge 60000 ] && keep=1 ;;
-esac
-if [ "$keep" = "1" ]; then
-  echo "GPU_KEEP slurm_cvd=${CUDA_VISIBLE_DEVICES:-unset} free=${free_mib}MiB"
-else
-  goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
-    | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
-  if [ -z "$goodidx" ]; then
-    echo "NO_GPU_WITH_HEADROOM probe=$probe"
-    echo "EXIT_CODE=43"
-    exit 43
+# Slurm's own CUDA_VISIBLE_DEVICES is unusable on these nodes: an unmanaged
+# Prohibited-mode card leaks into every job cgroup and takes index 0 (findings
+# 2026-07-27, verified again 2026-07-30 by a torch probe returning
+# AcceleratorError). So each job must choose a card itself — and if every job
+# just takes "the one with the most free memory", simultaneous jobs all choose
+# the SAME card: observed 7 jobs on 4 cards with 2 idle, and one card driven to
+# 132/143GB, which is how job 5739 OOMed. Claim a card with an exclusive lock so
+# our own jobs on this node never land on the same one. The lock is held for the
+# life of the job through the open descriptor.
+# The claim runs in THIS shell, not a subshell: a lock taken inside $(...) dies
+# with the subshell and would guarantee nothing.
+candidates=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
+  | /usr/bin/awk -F', ' '$2 == "Default" && $3 >= 60000 {print $3, $1}' | /usr/bin/sort -rn | /usr/bin/awk '{print $2}')
+if [ -z "$candidates" ]; then
+  echo "NO_GPU_WITH_HEADROOM"
+  echo "EXIT_CODE=43"
+  exit 43
+fi
+goodidx=""
+for idx in $candidates; do
+  exec {GPU_LOCK_FD}>"/tmp/helios_gpu_${idx}.lock" 2>/dev/null || continue
+  if /usr/bin/flock -n "$GPU_LOCK_FD"; then
+    goodidx="$idx"
+    break
   fi
+  exec {GPU_LOCK_FD}>&-
+done
+if [ -n "$goodidx" ]; then
   export CUDA_VISIBLE_DEVICES="$goodidx"
-  echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES (fallback, probe=$probe)"
+  echo "GPU_CLAIMED cvd=$CUDA_VISIBLE_DEVICES (exclusive lock, candidates=$(echo $candidates | tr '\n' ' '))"
+else
+  # Every roomy card is already claimed by one of our jobs: share the roomiest
+  # rather than failing, and say so in the log.
+  export CUDA_VISIBLE_DEVICES=$(echo "$candidates" | /usr/bin/head -1)
+  echo "GPU_SHARED cvd=$CUDA_VISIBLE_DEVICES (all free cards already locked)"
 fi
 
 ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" \
