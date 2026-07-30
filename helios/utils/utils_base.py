@@ -861,6 +861,7 @@ class HistoryProjector:
         codebook: Optional[torch.Tensor] = None,
         alpha: float = 1.0,
         padding_tol: float = 0.0,
+        smooth: float = 0.0,
     ):
         if mode not in self.MODES:
             raise ValueError(f"unknown history projection mode {mode!r}, expected one of {self.MODES}")
@@ -875,12 +876,22 @@ class HistoryProjector:
                 raise ValueError(f"codebook must be 2-D (K, C), got shape {tuple(codebook.shape)}")
         if padding_tol < 0.0:
             raise ValueError(f"padding_tol must be non-negative, got {padding_tol}")
+        if not 0.0 <= smooth < 1.0:
+            raise ValueError(f"smooth must be in [0, 1), got {smooth}")
 
         self.mode = mode
         self.step = float(step)
         self.codebook = codebook
         self.alpha = float(alpha)
         self.padding_tol = float(padding_tol)
+        # Read-time renorm recomputes its transform from the sliding window every
+        # section, so the SAME past frame is presented to the model under a
+        # slightly different transform on consecutive steps. That shows up as a
+        # step at every chunk boundary (a human reported a flicker at the 1.375s
+        # chunk cadence, 2026-07-30). Smoothing the transform across sections
+        # damps the step; the write-time site removes the cause instead.
+        self.smooth = float(smooth)
+        self.previous_transform = None
 
         # Frozen per-channel reference for "renorm", set on the first fully
         # populated history window.
@@ -907,6 +918,7 @@ class HistoryProjector:
             "step": self.step,
             "alpha": self.alpha,
             "padding_tol": self.padding_tol,
+            "smooth": self.smooth,
             "codebook_size": None if self.codebook is None else int(self.codebook.shape[0]),
             "num_calls": self.num_calls,
             "num_applied": self.num_applied,
@@ -995,6 +1007,11 @@ class HistoryProjector:
         ref_std = ref_std.to(device=std.device, dtype=std.dtype)
         scale = ref_std / std.clamp_min(1e-4)
         shift = ref_mean - mean * scale
+        if self.smooth > 0.0 and self.previous_transform is not None:
+            previous_scale, previous_shift = self.previous_transform
+            scale = self.smooth * previous_scale.to(scale.device) + (1.0 - self.smooth) * scale
+            shift = self.smooth * previous_shift.to(shift.device) + (1.0 - self.smooth) * shift
+        self.previous_transform = (scale.detach().clone(), shift.detach().clone())
 
         out = []
         for latents, mask in zip(tiers, masks):

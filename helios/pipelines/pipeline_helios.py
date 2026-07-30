@@ -992,6 +992,8 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         history_projection_alpha: float = 1.0,
         history_projection_codebook: Optional[str] = None,
         history_projection_padding_tol: float = 0.0,
+        history_projection_site: str = "read",  # read (per-section window) or write (once per chunk)
+        history_projection_smooth: float = 0.0,
         # ------------ Evolving memory ------------
         enable_evolving_memory: bool = False,
         memory_state: Optional[dict] = None,
@@ -1103,7 +1105,10 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 load_history_codebook(history_projection_codebook) if history_projection == "codebook" else None
             ),
             padding_tol=history_projection_padding_tol,
+            smooth=history_projection_smooth,
         )
+        if history_projection_site not in ("read", "write"):
+            raise ValueError(f"history_projection_site must be read or write, got {history_projection_site!r}")
         self._history_projector = history_projector
 
         history_sizes = sorted(history_sizes, reverse=True)  # From big to small
@@ -1409,7 +1414,7 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     :, :, -sum(history_sizes) :
                 ].split(history_sizes, dim=2)
 
-            if history_projector.enabled:
+            if history_projector.enabled and history_projection_site == "read":
                 # Project the accumulated history only. The first frame of the
                 # short tier is the fixed x0 anchor, which is a reference frame
                 # rather than accumulated state, so it is left untouched. This
@@ -1579,6 +1584,21 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     (is_first_section and image_latents is None) or (is_skip_first_section and is_second_section)
                 ):
                     image_latents = latents[:, :, 0:1, :, :]
+
+                # The first chunk is generated with an amplified schedule
+                # (is_amplify_first_chunk), so its statistics are not typical of
+                # the rollout: leave it out of both the correction and the frozen
+                # reference, which the second chunk then defines.
+                if history_projector.enabled and history_projection_site == "write" and not is_first_section:
+                    # Correct each chunk ONCE, before it becomes history, so a past
+                    # frame is never re-corrected by a later section's transform.
+                    # The read-time site recomputes its transform from the sliding
+                    # window, which presents the same past frame differently on
+                    # consecutive steps and steps the output at every chunk
+                    # boundary. Here the buffer and the returned latents carry the
+                    # same corrected values, so what the model reads is what is
+                    # rendered.
+                    latents = history_projector([latents])[0]
 
                 total_generated_latent_frames += latents.shape[2]
                 history_latents = torch.cat([history_latents, latents], dim=2)

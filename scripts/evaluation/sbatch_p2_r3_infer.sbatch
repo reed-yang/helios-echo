@@ -26,6 +26,8 @@ PROJ_CODEBOOK="${9:-none}"
 # Widens the rep50 case window; the default 8 keeps every existing campaign
 # identical, 16 exposes the held-out cases 8-15.
 NUMP="${10:-8}"
+PROJ_SITE="${11:-read}"
+PROJ_SMOOTH="${12:-0}"
 
 cd /mnt/beegfs/siyuan/workspace/helios-echo
 ENV=/mnt/beegfs/yuheng/miniconda3/envs/helios
@@ -72,7 +74,10 @@ if [ "$PARTIAL" != "none" ]; then
   ARGS+=(--memory-partial "$PARTIAL")
 fi
 if [ "$PROJ" != "none" ]; then
-  ARGS+=(--history-projection "$PROJ" --history-projection-alpha "$PROJ_ALPHA")
+  ARGS+=(--history-projection "$PROJ" --history-projection-alpha "$PROJ_ALPHA" --history-projection-site "$PROJ_SITE")
+  if [ "$PROJ_SMOOTH" != "0" ]; then
+    ARGS+=(--history-projection-smooth "$PROJ_SMOOTH")
+  fi
   if [ "$PROJ" = "quantize" ]; then
     ARGS+=(--history-projection-step "$PROJ_STEP")
   fi

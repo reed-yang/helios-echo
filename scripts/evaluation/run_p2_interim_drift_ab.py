@@ -148,6 +148,22 @@ def parse_args(argv=None):
         help="projection strength; 0 is a no-op, 1 is the full projection",
     )
     parser.add_argument(
+        "--history-projection-site",
+        choices=("read", "write"),
+        default="read",
+        help=(
+            "read: correct the sliding history window every section (the same past frame is "
+            "re-corrected by each section's transform); write: correct each chunk once before it "
+            "becomes history, which keeps a past frame fixed and avoids a step at chunk boundaries"
+        ),
+    )
+    parser.add_argument(
+        "--history-projection-smooth",
+        type=float,
+        default=0.0,
+        help="EMA factor in [0,1) applied to the read-time transform across sections, damping the per-chunk step",
+    )
+    parser.add_argument(
         "--history-projection-codebook",
         type=Path,
         help="(K, C) codebook .pt from fit_history_codebook.py, required by --history-projection codebook",
@@ -179,6 +195,10 @@ def parse_args(argv=None):
         parser.error("--history-projection codebook needs --history-projection-codebook")
     if not 0.0 <= args.history_projection_alpha <= 1.0:
         parser.error("--history-projection-alpha must be within [0, 1]")
+    if not 0.0 <= args.history_projection_smooth < 1.0:
+        parser.error("--history-projection-smooth must be within [0, 1)")
+    if args.history_projection_smooth > 0 and args.history_projection_site == "write":
+        parser.error("--history-projection-smooth only applies to the read site")
     if not args.dry_run and (args.prompt_index is None or args.arm is None):
         parser.error("a real rollout requires both --prompt-index and --arm")
     if not args.dry_run and args.run_id is None:
@@ -269,6 +289,8 @@ def history_projection_config(args):
         "mode": args.history_projection,
         "step": args.history_projection_step,
         "alpha": args.history_projection_alpha,
+        "site": args.history_projection_site,
+        "smooth": args.history_projection_smooth,
         "codebook": (
             {
                 "path": str(args.history_projection_codebook.resolve()),
@@ -797,6 +819,8 @@ def run(args, run_id, prompt_path, prompts):
             history_projection=args.history_projection,
             history_projection_step=args.history_projection_step,
             history_projection_alpha=args.history_projection_alpha,
+            history_projection_site=args.history_projection_site,
+            history_projection_smooth=args.history_projection_smooth,
             history_projection_codebook=(
                 str(args.history_projection_codebook) if args.history_projection_codebook is not None else None
             ),
