@@ -408,7 +408,13 @@ def main(args):
     # adapter (the all-linear scan above collects them otherwise).
     if args.training_config.is_enable_evolving_memory:
         target_modules = [t for t in target_modules if "evolving_memory" not in t]
-    else:
+    elif args.model_config.lora_target_modules:
+        # An explicitly configured list overrides the all-linear scan. Only when
+        # it is non-empty: lora_target_modules defaults to [], and overriding
+        # unconditionally discarded the scan for every memory-off config, which
+        # left PEFT with no targets at all ("No target_modules passed but also
+        # no target_parameters found"). That regression arrived with this fork's
+        # memory wiring (43a32c1) and never affected a memory-on run.
         target_modules = args.model_config.lora_target_modules
 
     # now we will add new LoRA weights the transformer layers

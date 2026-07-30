@@ -32,7 +32,7 @@ data_config:
     # head slice) — enough for smokes and pilots ONLY. The original corpus
     # (latents_cfr_int_30b_368x640, ~168k clips, 2.53TB) vanished in the reorg;
     # REPOINT to the full restore before launching real Stage A training.
-    - "/mnt/beegfs/siyuan/dataset/human_single_368x640_subset/latents"
+    - "/mnt/beegfs/siyuan/dataset/human_single_368x640_slice512g/latents"
 
 
 model_config:
