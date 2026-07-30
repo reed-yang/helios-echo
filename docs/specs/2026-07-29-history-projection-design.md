@@ -82,3 +82,50 @@ case 2/3 = off 臂两个单调失控 case;case 0 = off 臂稳定 case(质量护�
 - n=3(wave-1)不做统计主张,只做门槛筛选;wave-2 才回到 n=5。
 - renorm 的参照取自视频自身早期窗口:若某 case 早期本身已异常,参照会锁死一个坏统计量(现象上表现为全程贴合早期而非改善)。
 - 审查未覆盖(缺失测试):pipeline 调用点级集成测试(spy transformer 断言"transformer 收到的历史已投影 + anchor/buffer/RoPE/generator 未被改写")。当前由 CPU 单测 + 驱动效应量护栏 + 人工 file:line 追踪替代。
+
+## 七 与论文的精确对应,以及论文留白处的选择(2026-07-30 补)
+
+论文给定、可精确复现(已实现):① Ω ∈ ℝ^{K×C} 由 K-means 在数据集 latent 上离线拟合;② `Q(F)_p = argmin_k ‖F_p − Ω_k‖₂`,p = 逐 latent pixel 的 C 维通道向量;③ VAE encode 之后、patchify 之前,只作用条件帧,绝不碰加噪目标;④ 论文用法是**训练期**替换。
+
+实现对应:`flat = latents.permute(0,2,3,4,1).reshape(-1, C)` 每行一个 latent pixel;`argmin(‖m_k‖² − 2·x·m_k)` 与 `argmin‖x−m_k‖²` 等价(省略项对每像素为常数,单测钉住);`out = book[index]` 精确取质心行,且 α=1 短路返回投影本身(避免 `x+1.0*(y−x)` 的浮点回舍——码本模式的意义就是历史严格落在有限支撑集上)。
+
+论文留白 → 本设计的选择:
+
+| 留白 | 选择 | 理由 |
+|---|---|---|
+| K | 128 与 256 均拟合,当扫描维度 | 正文推荐 128、Table 2 用 256,自相矛盾且无 K-sweep 公开 |
+| 拟合空间 | 骨干实际消费的模型空间 | 语料存盘前已归一化;二次归一化评分 0.5304→0.8853 |
+| 拟合抽样 | 200 文件 × 2000 像素 = 360k 向量 | 算力;质心使用率 128/128、256/256,无死码 |
+| x0 anchor | 排除,不投影 | Helios 特有固定锚帧,FramePack 无对应物;它是参照而非累积状态 |
+| 零填充帧 | 精确零判定跳过 | 质心是真实 latent 向量,投影零帧等于往空历史注入内容 |
+
+不可复现:其权重与结果(从未发布)、Δ_M/ELO 数字(骨干与数据不同,且其模型带该替换训练)。
+
+## 八 P1 两机制的可移植性边界(2026-07-30)
+
+官方结果页原文:P1 = **Planned Anti-Drifting**("predicts sections that are far away from the next section before generating nearby sections",减少端点**之间**漂移)+ **History Discretization**(减少**跨端点**漂移)。
+
+**Planned Anti-Drifting 不可移植**:它是非因果的(先远后近),与 Helios 流式自回归 rollout 及记忆 k−2 逐出写入语义根本冲突(记忆状态机建立在"只见过去")。本设计只借离散化那一半。发布状态见 `logs/findings.md` 2026-07-30 条(仓库逐文件核实:76 KB、无训练代码、离散化关键词零命中、无 P1 仓库、无第三方实现)。
+
+## 九 实测验证(GPU 冒烟,数字对账)
+
+8-section 冒烟(off 臂 case 2),计数器与结构推算逐项一致:
+
+| 指标 | renorm | codebook k256 | 结构推算 |
+|---|---|---|---|
+| 应用次数 | 4/8 | 7/8 | renorm k=3 冻结/k=4-7 生效;codebook k=0 全零跳过 |
+| padding 帧 | 30/152 | 30/152 | 8×19=152;19+10+1=30 |
+| 改变元素 | 4,669,440 | 7,495,680 | 4×(19×16×48×80);122 有效帧×61,440 |
+| max_abs_delta | 0.329 | 3.166 | latent std ≈0.94;后者印证 37% 模长扰动 |
+
+两支 `EXIT_CODE=0`;`reference_call=4` 入 manifest。
+
+## 十 判读工具
+
+`scripts/evaluation/drift_onset_report.py`(`--campaign` 可重复、`--baseline` 按 prompt_index 对位出 delta、`--json`、`--bin-seconds`、`--slope-kind theil_sen|ols`)。验收 = 精确复现 `logs/research/read-r5-drift-onset-analysis.md` 的全部数字:onset a 209/173.2/203.5s(触发 3/5、5/5、5/5)、onset b 168.4/178.8/123.8s、回收比 0.8007/0.511/0.8094、失控 2/0/3、零冻结、30s 轨迹逐箱一致;短跑(57.8s < 60s 基线窗)返回 `None` 带原因串。
+
+## 十一 战役清单与"训练救回"配方
+
+已发(2026-07-30):wave-1 筛选 5888-5896 + metrics 5897;wave-1b 强度/K 扫描 5901-5908 + 5909(renorm α=0.5/0.25、k256 α=0.5、k128 α=1 × case 2/3);held-out 泛化 5911-5934 + 5935(rep50 case 8-15 × {off, pilot@4000, full@12000},切换协议)。种子沿用 `base_seed 7 + case`,与既有 `p2-rep50-r5long-off` 逐 case 配对,不重跑基线。
+
+**训练救回配方(wave 出正向信号后的第一发)**:量化历史的 OOD 集中在 history patchify 边界,而读历史的就是 `patch_long/mid/short` 三个 Conv3d(6 个张量),它们已在 `save/load_extra_components` 的可训练额外件机制内(Stage A 冻结之)。⇒ 只解冻这 3 个 conv(±记忆)在量化历史上微调,参数量极小、正对 OOD 位置,且这才是 FramePack 原式的用法。
