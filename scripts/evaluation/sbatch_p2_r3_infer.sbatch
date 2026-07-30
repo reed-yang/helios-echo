@@ -48,19 +48,41 @@ case ",$owners" in
 esac
 echo "GPU_OWNERS=$owners"
 
-# Compute nodes leak an unmanaged Prohibited-mode GPU into every job cgroup
-# (findings 2026-07-27), and colleagues' stacked processes grow dynamically
-# (2026-07-28: 63GB -> 116GB mid-run OOMed job 5739). Pick the Default-mode
-# visible GPU with the most free memory and require ~60GB headroom.
-goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
-  | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
-if [ -z "$goodidx" ]; then
-  echo "NO_GPU_WITH_HEADROOM"
-  echo "EXIT_CODE=43"
-  exit 43
+# Slurm hands a single-GPU job its own card as cgroup index 0, so its own
+# CUDA_VISIBLE_DEVICES is both correct and distinct per job. Probe it first and
+# only fall back to picking a card ourselves. An UNCONDITIONAL "pick the
+# Default-mode card with the most free memory" makes every job that starts at
+# the same moment select the SAME card: observed 2026-07-30 on mc-node02 with 7
+# jobs piled onto 4 cards while 2 sat idle. The fallback still exists because
+# these nodes leak an unmanaged Prohibited-mode card into the cgroup (findings
+# 2026-07-27), which makes the assigned device unusable, and because a
+# colleague's stacked process can grow mid-run (2026-07-28 OOM of job 5739).
+probe=$("$ENV/bin/python" -c "
+import torch
+try:
+    free, _ = torch.cuda.mem_get_info(0)
+    print('OK', free // (1024 * 1024))
+except Exception as exc:
+    print('FAIL', type(exc).__name__)
+" 2>/dev/null)
+echo "GPU_PROBE=$probe"
+keep=0
+case "$probe" in
+  OK*) free_mib=${probe#OK }; [ "$free_mib" -ge 60000 ] && keep=1 ;;
+esac
+if [ "$keep" = "1" ]; then
+  echo "GPU_KEEP slurm_cvd=${CUDA_VISIBLE_DEVICES:-unset} free=${free_mib}MiB"
+else
+  goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
+    | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
+  if [ -z "$goodidx" ]; then
+    echo "NO_GPU_WITH_HEADROOM probe=$probe"
+    echo "EXIT_CODE=43"
+    exit 43
+  fi
+  export CUDA_VISIBLE_DEVICES="$goodidx"
+  echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES (fallback, probe=$probe)"
 fi
-export CUDA_VISIBLE_DEVICES="$goodidx"
-echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 
 ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" --prompt-set rep50 --num-prompts "$NUMP" --sections "$SECTIONS")
 if [ "$PARTIAL" != "none" ]; then

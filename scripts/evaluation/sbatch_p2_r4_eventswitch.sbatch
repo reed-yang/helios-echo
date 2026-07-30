@@ -45,17 +45,36 @@ case ",$owners" in
 esac
 echo "GPU_OWNERS=$owners"
 
-# Pick the Default-mode visible GPU with the most free memory (leaked
-# Prohibited cards + colleagues' dynamically growing processes; see findings).
-goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
-  | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
-if [ -z "$goodidx" ]; then
-  echo "NO_GPU_WITH_HEADROOM"
-  echo "EXIT_CODE=43"
-  exit 43
+# Trust Slurm's own per-job GPU (cgroup index 0) unless it is unusable. An
+# unconditional max-free pick makes simultaneous jobs choose the same card and
+# pile up on it (2026-07-30: 7 jobs on 4 cards, 2 idle); the fallback remains
+# for the leaked Prohibited card and for a colleague's growing process.
+probe=$("$ENV/bin/python" -c "
+import torch
+try:
+    free, _ = torch.cuda.mem_get_info(0)
+    print('OK', free // (1024 * 1024))
+except Exception as exc:
+    print('FAIL', type(exc).__name__)
+" 2>/dev/null)
+echo "GPU_PROBE=$probe"
+keep=0
+case "$probe" in
+  OK*) free_mib=${probe#OK }; [ "$free_mib" -ge 60000 ] && keep=1 ;;
+esac
+if [ "$keep" = "1" ]; then
+  echo "GPU_KEEP slurm_cvd=${CUDA_VISIBLE_DEVICES:-unset} free=${free_mib}MiB"
+else
+  goodidx=$(/usr/bin/nvidia-smi --query-gpu=index,compute_mode,memory.free --format=csv,noheader,nounits \
+    | /usr/bin/awk -F', ' '$2 == "Default" && $3 > best {best = $3; idx = $1} END {if (best >= 60000) print idx}')
+  if [ -z "$goodidx" ]; then
+    echo "NO_GPU_WITH_HEADROOM probe=$probe"
+    echo "EXIT_CODE=43"
+    exit 43
+  fi
+  export CUDA_VISIBLE_DEVICES="$goodidx"
+  echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES (fallback, probe=$probe)"
 fi
-export CUDA_VISIBLE_DEVICES="$goodidx"
-echo "REMAPPED cvd=$CUDA_VISIBLE_DEVICES"
 
 ARGS=(--arm "$ARM" --prompt-index "$PIDX" --run-id "$RUNID" \
       --prompt-set rep50 --num-prompts "$NUMP" --segments 6 --sections-per-segment 7)
